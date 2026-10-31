@@ -1,3 +1,89 @@
+
+load()
+enable()
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+G pressed through KeyInputEvent
+G pressed through KeyInputEvent
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+gamemode 0 -> 1
+gamemode 1 -> 2
+gamemode 2 -> 6
+disable()
+load()
+enable()
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+disable()
+load()
+enable()
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+disable()
 load()
 enable()
 G pressed through KeyInputEvent
@@ -25,4 +111,35 @@ gamemode 2 -> 6
 G pressed through KeyInputEvent
 gamemode 6 -> 0
 G pressed through KeyInputEvent
+G pressed through KeyInputEvent
+G pressed through KeyInputEvent
 gamemode 0 -> 1
+gamemode 1 -> 2
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+disable()
+load()
+enable()
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0
+G pressed through KeyInputEvent
+gamemode 0 -> 1
+disable()
+load()
+enable()
+disable()
+load()
+enable()
+G pressed through KeyInputEvent
+gamemode 1 -> 2
+G pressed through KeyInputEvent
+gamemode 2 -> 6
+G pressed through KeyInputEvent
+gamemode 6 -> 0

@@ -1,95 +1,115 @@
 #include "mod/DevClient.h"
 
+#include "mod/Gamemode.h"
+
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/input/KeyInputEvent.h"
-#include "ll/api/input/KeyRegistry.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/service/Bedrock.h"
+#include "ll/api/thread/ClientThreadExecutor.h"
 
-#include "mc/world/actor/player/Player.h"
-#include "mc/world/level/GameType.h"
-#include "mc/world/level/Level.h"
+#include "mc/client/game/ClientInstance.h"
 
+#include <chrono>
 #include <fstream>
-#include <string>
+#include <string_view>
+
+#include <Windows.h>
 
 namespace dev_client {
 
-static void dbg(std::string const& msg) {
-    std::ofstream f("C:/Users/catal/Documents/GitHub/ReBo/Minecraft Dev Client/debug.txt", std::ios::app);
-    f << msg << "\n";
+namespace {
+bool isMinecraftForeground() {
+    HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr) {
+        return false;
+    }
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(foreground, &processId);
+    return processId == GetCurrentProcessId();
 }
 
-static constexpr int kKeyG = 0x47; // Windows VK_G
-
-static GameType const kModes[] = {
-    GameType::Survival,
-    GameType::Creative,
-    GameType::Adventure,
-    GameType::Spectator,
-};
-
-static void toggleGamemode() {
-    auto level = ll::service::getMultiPlayerLevel();
-    if (!level) {
-        dbg("no multiplayer level");
-        return;
+bool isGameplayActive() {
+    auto client = ll::service::getClientInstance();
+    if (!client || !client->isWorldActive()) {
+        return false;
     }
 
-    auto* player = level->getPrimaryLocalPlayer();
-    if (!player) {
-        dbg("no player");
-        return;
-    }
-
-    auto current = player->getPlayerGameType();
-
-    size_t idx = 0;
-    for (size_t i = 0; i < std::size(kModes); ++i) {
-        if (kModes[i] == current) {
-            idx = i;
-            break;
+    auto const screenName = client->getTopScreenName();
+    for (std::string_view menuName : {"pause", "chat", "inventory", "start", "death", "trade", "container"}) {
+        if (screenName.find(menuName) != std::string::npos) {
+            return false;
         }
     }
-    GameType next = kModes[(idx + 1) % std::size(kModes)];
-
-    player->setPlayerGameType(next);
-    dbg("gamemode " + std::to_string(static_cast<int>(current)) + " -> " + std::to_string(static_cast<int>(next)));
+    return true;
 }
+
+constexpr int kKeyG = 0x47;
+} // namespace
 
 DevClient& DevClient::getInstance() {
     static DevClient instance;
     return instance;
 }
 
+void DevClient::debug(std::string_view message) const {
+    std::ofstream output(getSelf().getModDir() / "debug.txt", std::ios::app);
+    if (output) {
+        output << message << '\n';
+    }
+}
+
 bool DevClient::load() {
-    dbg("load()");
+    debug("load()");
     getSelf().getLogger().info("Loaded");
     return true;
 }
 
 bool DevClient::enable() {
-    dbg("enable()");
-
-    auto& toggle = ll::input::KeyRegistry::getInstance().getOrCreateKey("dev-client.toggle-gamemode", {'G'});
-
-    toggle.registerButtonDownHandler([](FocusImpact, IClientInstance&) {
-        dbg("G pressed through KeyRegistry");
-        toggleGamemode();
-    });
-
     mListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::KeyInputEvent>(
-        [](ll::event::KeyInputEvent& event) {
-            if (event.isDown() && event.keyCode() == kKeyG) {
-                dbg("G pressed through KeyInputEvent");
-                toggleGamemode();
+        [this](ll::event::KeyInputEvent& event) {
+            if (event.keyCode() != kKeyG) {
+                return;
+            }
+
+            if (!isMinecraftForeground()) {
+                mGPressed = false;
+                return;
+            }
+
+            if (!isGameplayActive()) {
+                mGPressed = false;
+                return;
+            }
+
+            if (event.isDown()) {
+                if (mGPressed) {
+                    return;
+                }
+                mGPressed      = true;
+                auto const now = std::chrono::steady_clock::now();
+                if (now - mLastGamemodeSwitch < std::chrono::milliseconds{250}) {
+                    return;
+                }
+                mLastGamemodeSwitch = now;
+                ll::thread::ClientThreadExecutor::getDefault().execute([] { gamemode::cycleLocalPlayer(); });
+            } else {
+                mGPressed = false;
             }
         }
     );
+
+    debug("enable()");
+    getSelf().getLogger().info("Enabled");
     return true;
 }
+
 bool DevClient::disable() {
-    dbg("disable()");
+    mListener.reset();
+    mGPressed = false;
+    debug("disable()");
+    getSelf().getLogger().info("Disabled");
     return true;
 }
 

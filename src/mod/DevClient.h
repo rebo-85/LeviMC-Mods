@@ -3,6 +3,9 @@
 #include "ll/api/event/ListenerBase.h"
 #include "ll/api/mod/NativeMod.h"
 
+#include <chrono>
+#include <string_view>
+
 namespace dev_client {
 
 class DevClient {
@@ -23,13 +26,17 @@ public:
     /// @return True if the mod is disabled successfully.
     bool disable();
 
+    void debug(std::string_view message) const;
+
     // TODO: Implement this method if you need to unload the mod.
     // /// @return True if the mod is unloaded successfully.
     // bool unload();
 
 private:
-    ll::mod::NativeMod&    mSelf;
-    ll::event::ListenerPtr mListener;
+    ll::mod::NativeMod&                   mSelf;
+    ll::event::ListenerPtr                mListener;
+    bool                                  mGPressed{false};
+    std::chrono::steady_clock::time_point mLastGamemodeSwitch{};
 };
 
 } // namespace dev_client
