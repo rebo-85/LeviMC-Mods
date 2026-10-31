@@ -24,8 +24,16 @@ bool isMinecraftForeground() {
         return false;
     }
 
+    HWND window = GetAncestor(foreground, GA_ROOT);
+    if (window == nullptr) {
+        window = foreground;
+    }
+    if (!IsWindowVisible(window) || IsIconic(window)) {
+        return false;
+    }
+
     DWORD processId = 0;
-    GetWindowThreadProcessId(foreground, &processId);
+    GetWindowThreadProcessId(window, &processId);
     return processId == GetCurrentProcessId();
 }
 
@@ -67,6 +75,7 @@ bool CreatorTools::enable() {
 
             if (!isMinecraftForeground()) {
                 mGPressed = false;
+                event.cancel();
                 return;
             }
 
