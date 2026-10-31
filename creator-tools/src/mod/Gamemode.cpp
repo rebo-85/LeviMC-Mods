@@ -1,6 +1,6 @@
 #include "mod/Gamemode.h"
 
-#include "mod/DevClient.h"
+#include "mod/CreatorTools.h"
 
 #include "ll/api/service/Bedrock.h"
 
@@ -11,7 +11,7 @@
 #include <array>
 #include <string>
 
-namespace dev_client::gamemode {
+namespace creator_tools::gamemode {
 
 namespace {
 
@@ -68,8 +68,8 @@ void sendGameModeMessage(Player& player, GameType mode) {
 }
 
 bool cycleLocalPlayer() {
-    auto& devClient = DevClient::getInstance();
-    auto& log       = devClient.getSelf().getLogger();
+    auto& creatorTools = CreatorTools::getInstance();
+    auto& log          = creatorTools.getSelf().getLogger();
 
     auto level = ll::service::getMultiPlayerLevel();
     if (!level) {
@@ -90,10 +90,8 @@ bool cycleLocalPlayer() {
     player->setPlayerGameType(target);
     sendGameModeMessage(*player, target);
 
-    devClient.debug(
-        "gamemode " + std::to_string(static_cast<int>(current)) + " -> " + std::to_string(static_cast<int>(target))
-    );
+    log.info("Gamemode {} -> {}", name(current), name(target));
     return true;
 }
 
-} // namespace dev_client::gamemode
+} // namespace creator_tools::gamemode

@@ -4,7 +4,7 @@
 
 #include <string_view>
 
-namespace dev_client::gamemode {
+namespace creator_tools::gamemode {
 
 /// Next mode in the Survival -> Creative -> Adventure -> Spectator cycle.
 /// Unknown modes restart the cycle at Survival.
@@ -15,4 +15,4 @@ namespace dev_client::gamemode {
 /// Cycles the local player's gamemode. Returns false if no player/level is available.
 bool cycleLocalPlayer();
 
-} // namespace dev_client::gamemode
+} // namespace creator_tools::gamemode

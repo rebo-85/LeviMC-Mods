@@ -4,16 +4,15 @@
 #include "ll/api/mod/NativeMod.h"
 
 #include <chrono>
-#include <string_view>
 
-namespace dev_client {
+namespace creator_tools {
 
-class DevClient {
+class CreatorTools {
 
 public:
-    static DevClient& getInstance();
+    static CreatorTools& getInstance();
 
-    DevClient() : mSelf(*ll::mod::NativeMod::current()) {}
+    CreatorTools() : mSelf(*ll::mod::NativeMod::current()) {}
 
     [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
 
@@ -26,8 +25,6 @@ public:
     /// @return True if the mod is disabled successfully.
     bool disable();
 
-    void debug(std::string_view message) const;
-
     // TODO: Implement this method if you need to unload the mod.
     // /// @return True if the mod is unloaded successfully.
     // bool unload();
@@ -39,4 +36,4 @@ private:
     std::chrono::steady_clock::time_point mLastGamemodeSwitch{};
 };
 
-} // namespace dev_client
+} // namespace creator_tools

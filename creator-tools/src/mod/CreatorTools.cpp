@@ -1,4 +1,4 @@
-#include "mod/DevClient.h"
+#include "mod/CreatorTools.h"
 
 #include "mod/Gamemode.h"
 
@@ -11,12 +11,11 @@
 #include "mc/client/game/ClientInstance.h"
 
 #include <chrono>
-#include <fstream>
 #include <string_view>
 
 #include <Windows.h>
 
-namespace dev_client {
+namespace creator_tools {
 
 namespace {
 bool isMinecraftForeground() {
@@ -48,25 +47,18 @@ bool isGameplayActive() {
 constexpr int kKeyG = 0x47;
 } // namespace
 
-DevClient& DevClient::getInstance() {
-    static DevClient instance;
+CreatorTools& CreatorTools::getInstance() {
+    static CreatorTools instance;
     return instance;
 }
 
-void DevClient::debug(std::string_view message) const {
-    std::ofstream output(getSelf().getModDir() / "debug.txt", std::ios::app);
-    if (output) {
-        output << message << '\n';
-    }
-}
-
-bool DevClient::load() {
-    debug("load()");
+bool CreatorTools::load() {
+    getSelf().getLogger().info("Loading");
     getSelf().getLogger().info("Loaded");
     return true;
 }
 
-bool DevClient::enable() {
+bool CreatorTools::enable() {
     mListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::KeyInputEvent>(
         [this](ll::event::KeyInputEvent& event) {
             if (event.keyCode() != kKeyG) {
@@ -100,19 +92,17 @@ bool DevClient::enable() {
         }
     );
 
-    debug("enable()");
     getSelf().getLogger().info("Enabled");
     return true;
 }
 
-bool DevClient::disable() {
+bool CreatorTools::disable() {
     mListener.reset();
     mGPressed = false;
-    debug("disable()");
     getSelf().getLogger().info("Disabled");
     return true;
 }
 
-} // namespace dev_client
+} // namespace creator_tools
 
-LL_REGISTER_MOD(dev_client::DevClient, dev_client::DevClient::getInstance());
+LL_REGISTER_MOD(creator_tools::CreatorTools, creator_tools::CreatorTools::getInstance());

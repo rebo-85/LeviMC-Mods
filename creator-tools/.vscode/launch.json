@@ -2,15 +2,15 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug dev-client: Attach Minecraft",
+      "name": "Debug Creator Tools: Attach Minecraft",
       "type": "cppvsdbg",
       "request": "attach",
       "processId": "${command:pickProcess}",
-      "symbolSearchPath": "${workspaceFolder}\\build\\windows\\x64\\debug;${workspaceFolder}\\bin\\dev-client",
+      "symbolSearchPath": "${workspaceFolder}\\build\\windows\\x64\\debug;${workspaceFolder}\\bin\\creator-tools",
       "sourceFileMap": {
         "${workspaceFolder}": "${workspaceFolder}"
       },
-      "preLaunchTask": "Build dev-client (debug)"
+      "preLaunchTask": "Build Creator Tools (debug)"
     }
   ]
 }

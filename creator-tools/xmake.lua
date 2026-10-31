@@ -19,7 +19,7 @@ if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
 
-target("dev-client") -- Change this to your mod name.
+target("creator-tools")
     add_rules("@levibuildscript/linkrule")
     add_rules("@levibuildscript/modpacker")
     if is_plat("windows") then
