@@ -1,15 +1,16 @@
 #pragma once
 
+#include "ll/api/event/ListenerBase.h"
 #include "ll/api/mod/NativeMod.h"
 
-namespace my_mod {
+namespace dev_client {
 
-class MyMod {
+class DevClient {
 
 public:
-    static MyMod& getInstance();
+    static DevClient& getInstance();
 
-    MyMod() : mSelf(*ll::mod::NativeMod::current()) {}
+    DevClient() : mSelf(*ll::mod::NativeMod::current()) {}
 
     [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
 
@@ -27,7 +28,8 @@ public:
     // bool unload();
 
 private:
-    ll::mod::NativeMod& mSelf;
+    ll::mod::NativeMod&    mSelf;
+    ll::event::ListenerPtr mListener;
 };
 
-} // namespace my_mod
+} // namespace dev_client

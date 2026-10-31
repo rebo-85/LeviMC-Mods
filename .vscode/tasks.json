@@ -1,0 +1,68 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build dev-client (debug)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$env:PATH = 'C:\\Program Files\\LLVM\\bin;' + $env:PATH; xmake f -y -p windows -a x64 -m debug --target_type=client; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; xmake b dev-client"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Build and install dev-client (debug)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Build dev-client (debug)", "Install dev-client (debug)"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Install dev-client (debug)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$running = Get-Process -Name 'Minecraft.Windows' -ErrorAction SilentlyContinue; if ($running) { throw 'Close Minecraft before installing a native DLL.' }; $source = '${workspaceFolder}\\bin\\dev-client'; $dest = Join-Path $env:APPDATA 'levilauncher.exe\\versions\\LeviLamina - 1.26.51.01\\mods\\dev-client'; if (-not (Test-Path (Join-Path $source 'dev-client.dll'))) { throw 'Debug build is missing dev-client.dll.' }; New-Item -ItemType Directory -Force -Path $dest | Out-Null; Copy-Item -LiteralPath (Join-Path $source 'dev-client.dll') -Destination $dest -Force; Copy-Item -LiteralPath (Join-Path $source 'dev-client.pdb') -Destination $dest -Force; Copy-Item -LiteralPath (Join-Path $source 'manifest.json') -Destination $dest -Force"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Open LeviLauncher",
+      "type": "process",
+      "command": "C:\\Program Files\\LeviMC\\LeviLauncher\\LeviLauncher.exe",
+      "args": [],
+      "options": {
+        "cwd": "C:\\Program Files\\LeviMC\\LeviLauncher"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Clear dev-client debug log",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Set-Content -LiteralPath '${workspaceFolder}\\debug.txt' -Value ''"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

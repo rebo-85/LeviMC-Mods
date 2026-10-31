@@ -4,12 +4,9 @@
   "tooth": "github.com/LiteLDev/levilamina-mod-template",
   "version": "0.0.0",
   "info": {
-    "name": "My Mod",
-    "description": "Description of my mod",
-    "tags": [
-      "platform:levilamina",
-      "type:mod"
-    ],
+    "name": "Dev Client",
+    "description": "This is a development client for the LeviLamina mod template. It is used for testing and development purposes.",
+    "tags": ["platform:levilamina", "type:mod"],
     "avatar_url": "https://example.com/my-mod/avatar.png"
   },
   "variants": [
@@ -22,9 +19,7 @@
       "assets": [
         {
           "type": "zip",
-          "urls": [
-            "https://{{tooth}}/releases/download/v{{version}}/levilamina-mod-template-server-windows-x64.zip"
-          ],
+          "urls": ["https://{{tooth}}/releases/download/v{{version}}/levilamina-mod-template-server-windows-x64.zip"],
           "placements": [
             {
               "type": "dir",
@@ -56,9 +51,7 @@
       "assets": [
         {
           "type": "zip",
-          "urls": [
-            "https://{{tooth}}/releases/download/v{{version}}/levilamina-mod-template-client-windows-x64.zip"
-          ],
+          "urls": ["https://{{tooth}}/releases/download/v{{version}}/levilamina-mod-template-client-windows-x64.zip"],
           "placements": [
             {
               "type": "dir",
