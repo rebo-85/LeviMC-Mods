@@ -9,7 +9,7 @@ The mod is intentionally focused and lightweight:
 - G: cycles the local player's game mode in order: Survival -> Creative -> Adventure -> Spectator
 - Ctrl + R: requests a behavior-resource reload on a local world, or sends `/reload` to a remote server
 - Shift + R: refreshes client packs, then reloads animations, geometries, textures, and UI resources
-- Ctrl + right-click: toggles a floating debug label for the targeted entity in local worlds
+- Ctrl + right-click: toggles a world-space debug label for the targeted entity in local worlds
 
 These actions are only triggered when Minecraft is the active foreground window and the player is in gameplay, which helps avoid accidental input while menus or chat are open.
 
@@ -29,9 +29,9 @@ This makes the mod helpful for creators iterating on map layouts, tests, and vis
 
 ### Entity debug label
 
-Aim at an entity and Ctrl + right-click to show a floating label above it with health, position, velocity, and behavior-tree details, plus a wireframe of its collision box. The label follows the entity without changing its name tag. Ctrl + right-click the selected entity again to hide it, or select a different entity to switch the label.
+Aim at an entity and Ctrl + right-click to show world-space text above it with health, position, velocity, and behavior-tree details, plus a wireframe of its collision box. The shapes attach to the entity, so Minecraft tracks their position without screen-space projection. Ctrl + right-click the selected entity again to hide it, or select a different entity to switch the label. This uses Minecraft's native primitive-shape packets and requires a local world with an integrated server; it is not available on remote servers.
 
-Behavior details are read from the local world's integrated server; they are unavailable for entities on remote servers.
+Behavior details are read from the local world's integrated server, with the currently running behavior highlighted green.
 
 ## Project status
 

@@ -29,14 +29,18 @@ private:
 
     void clearSelection();
     void requestBehaviorSnapshot(std::uint64_t runtimeId);
+    void queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation);
+    void queueShapeRemoval(std::uint64_t generation);
 
     ll::event::ListenerPtr                mMouseListener;
     ll::event::ListenerPtr                mRenderListener;
     std::atomic<std::uint64_t>            mSelectedRuntimeId{0};
     std::atomic<std::uint64_t>            mSelectionGeneration{0};
     std::uint64_t                         mLastRenderLogGeneration{std::numeric_limits<std::uint64_t>::max()};
-    std::uint64_t                         mLastProjectionWarningGeneration{std::numeric_limits<std::uint64_t>::max()};
-    std::chrono::steady_clock::time_point mNextProjectionDiagnostic{};
+    std::mutex                            mShapeRefreshMutex;
+    std::chrono::steady_clock::time_point mNextShapeRefresh{};
+    std::atomic<std::uint64_t>            mLastShapeWarningGeneration{std::numeric_limits<std::uint64_t>::max()};
+    std::size_t                           mActiveTextShapeCount{};
     std::mutex                            mBehaviorRefreshMutex;
     std::mutex                            mBehaviorSnapshotMutex;
     BehaviorSnapshot                      mBehaviorSnapshot;

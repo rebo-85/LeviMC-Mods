@@ -9,16 +9,15 @@
 #include "ll/api/thread/ServerThreadExecutor.h"
 
 #include "mc/client/game/ClientInstance.h"
-#include "mc/client/gui/CaretMeasureData.h"
-#include "mc/client/gui/TextMeasureData.h"
-#include "mc/client/player/LocalPlayer.h"
-#include "mc/client/renderer/screen/MinecraftUIRenderContext.h"
 #include "mc/deps/core/math/Color.h"
 #include "mc/deps/input/MouseAction.h"
-#include "mc/deps/input/RectangleArea.h"
-#include "mc/deps/renderer/Camera.h"
 #include "mc/entity/components/BehaviorComponent.h"
 #include "mc/legacy/ActorRuntimeID.h"
+#include "mc/network/packet/BoxDataPayload.h"
+#include "mc/network/packet/PrimitiveShapeDataPayload.h"
+#include "mc/network/packet/PrimitiveShapesPacket.h"
+#include "mc/network/packet/TextDataPayload.h"
+#include "mc/scripting/modules/minecraft/primitiveshapes/ScriptPrimitiveShapeType.h"
 #include "mc/world/actor/Actor.h"
 #include "mc/world/actor/bhave/BehaviorStatus.h"
 #include "mc/world/actor/bhave/definition/BehaviorDefinition.h"
@@ -38,11 +37,10 @@
 #include "mc/world/phys/HitResult.h"
 
 #include <algorithm>
-#include <array>
-#include <cmath>
+#include <chrono>
 #include <fmt/format.h>
-#include <glm/matrix.hpp>
 #include <utility>
+#include <vector>
 
 #include <Windows.h>
 
@@ -51,7 +49,13 @@ namespace creator_tools {
 namespace {
 
 constexpr auto        kBehaviorRefreshInterval = std::chrono::milliseconds{250};
+constexpr auto        kShapeRefreshInterval    = std::chrono::milliseconds{100};
 constexpr std::size_t kMaxDisplayedBehaviors   = 8;
+constexpr std::size_t kMaxDebugTextLines       = 16;
+constexpr std::uint64_t kShapeIdBase           = 0x43544F4F4C530000ULL;
+constexpr std::uint64_t kBoxShapeId            = kShapeIdBase + kMaxDebugTextLines;
+
+using DebugTextLine = std::pair<std::string, bool>;
 
 void collectBehaviorNames(BehaviorDefinition const* definition, std::vector<std::string>& names) {
     if (!definition || names.size() >= 64) {
@@ -116,182 +120,74 @@ BehaviorNode const* getRunningLeaf(BehaviorNode const* node) {
     return node->mStatus == BehaviorStatus::Running ? node : nullptr;
 }
 
-bool projectToScreen(
-    MinecraftUIRenderContext& context,
-    mce::Camera const&        camera,
-    Vec3 const&               cameraPosition,
-    Vec3 const&               position,
-    float&                    screenX,
-    float&                    screenY,
-    std::string&              failure,
-    glm::vec4&                cameraSpace,
-    glm::vec4&                clip,
-    glm::vec2&                ndc
+PrimitiveShapeDataPayload makeTextShape(
+    std::uint64_t  id,
+    Vec3 const&    locationOffset,
+    std::string    text,
+    mce::Color     color,
+    DimensionType  dimension,
+    ActorUniqueID  attachedTo
 ) {
-    auto const offset =
-        glm::vec3{position.x, position.y, position.z} - glm::vec3{cameraPosition.x, cameraPosition.y, cameraPosition.z};
-    auto const depth = glm::dot(offset, camera.mForward.get());
-    if (depth <= 0.001f) {
-        failure = "behind-camera";
-        return false;
-    }
+    PrimitiveShapeDataPayload shape{};
+    shape.mNetworkId          = id;
+    shape.mShapeType          = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Text;
+    shape.mLocation           = locationOffset;
+    shape.mColor              = color;
+    shape.mDimensionId        = dimension;
+    shape.mAttachedToId       = attachedTo;
+    shape.mMaxRenderDistance = 64.0f;
 
-    auto const horizontal               = glm::dot(offset, camera.mRight.get());
-    auto const vertical                 = glm::dot(offset, camera.mUp.get());
-    cameraSpace                         = glm::vec4{horizontal, vertical, -depth, 1.0f};
-    constexpr float kFallbackFovDegrees = 70.0f;
-    auto const      configuredFov       = static_cast<float>(camera.mFov);
-    auto const      fovRadians     = configuredFov > 0.001f
-                                       ? (configuredFov > 3.14159265f ? glm::radians(configuredFov) : configuredFov)
-                                       : glm::radians(kFallbackFovDegrees);
-    auto const      tanHalfFov     = std::tan(fovRadians * 0.5f);
-    auto const      bounds         = context.getFullClippingRectangle();
-    auto const      viewportWidth  = static_cast<float>(bounds._x1 - bounds._x0);
-    auto const      viewportHeight = static_cast<float>(bounds._y1 - bounds._y0);
-    if (!std::isfinite(tanHalfFov) || tanHalfFov <= 0.001f || viewportHeight <= 0.0f || viewportWidth <= 0.0f) {
-        failure = "invalid-projection-parameters";
-        return false;
-    }
-
-    auto const aspect = viewportWidth / viewportHeight;
-    ndc               = {horizontal / (depth * tanHalfFov * aspect), vertical / (depth * tanHalfFov)};
-    clip              = glm::vec4{ndc.x, ndc.y, 0.0f, 1.0f};
-    if (std::abs(ndc.x) > 1.0f || std::abs(ndc.y) > 1.0f) {
-        failure = "outside-viewport";
-        return false;
-    }
-
-    screenX = bounds._x0 + (ndc.x + 1.0f) * 0.5f * (bounds._x1 - bounds._x0);
-    screenY = bounds._y0 + (1.0f - ndc.y) * 0.5f * (bounds._y1 - bounds._y0);
-    failure.clear();
-    return true;
+    TextDataPayload textPayload{};
+    textPayload.mText        = std::move(text);
+    textPayload.mUseRotation = false;
+    shape.mExtraDataPayload  = std::move(textPayload);
+    return shape;
 }
 
-bool projectToScreen(
-    MinecraftUIRenderContext& context,
-    mce::Camera const&        camera,
-    Vec3 const&               cameraPosition,
-    Vec3 const&               position,
-    float&                    screenX,
-    float&                    screenY
+PrimitiveShapeDataPayload makeBoxShape(
+    std::uint64_t id,
+    AABB const&  bounds,
+    Vec3 const&  locationOffset,
+    DimensionType dimension,
+    ActorUniqueID attachedTo
 ) {
-    std::string failure;
-    glm::vec4   cameraSpace{};
-    glm::vec4   clip{};
-    glm::vec2   ndc{};
-    return projectToScreen(
-        context,
-        camera,
-        cameraPosition,
-        position,
-        screenX,
-        screenY,
-        failure,
-        cameraSpace,
-        clip,
-        ndc
-    );
+    PrimitiveShapeDataPayload shape{};
+    shape.mNetworkId          = id;
+    shape.mShapeType          = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Box;
+    shape.mLocation           = locationOffset;
+    shape.mColor              = mce::Color{0.2f, 0.9f, 1.0f, 1.0f};
+    shape.mDimensionId        = dimension;
+    shape.mAttachedToId       = attachedTo;
+    shape.mMaxRenderDistance = 64.0f;
+    shape.mExtraDataPayload  = BoxDataPayload{Vec3{
+        bounds.max.x - bounds.min.x,
+        bounds.max.y - bounds.min.y,
+        bounds.max.z - bounds.min.z
+    }};
+    return shape;
 }
 
-void drawClippedLine(
-    MinecraftUIRenderContext& context,
-    RectangleArea const&      bounds,
-    glm::vec2                 start,
-    glm::vec2                 end,
-    mce::Color const&         color
-) {
-    auto const delta  = end - start;
-    auto const length = glm::length(delta);
-    if (length <= 0.001f) {
-        return;
-    }
-
-    auto const minX = static_cast<float>(bounds._x0);
-    auto const maxX = static_cast<float>(bounds._x1);
-    auto const minY = static_cast<float>(bounds._y0);
-    auto const maxY = static_cast<float>(bounds._y1);
-    float      t0   = 0.0f;
-    float      t1   = 1.0f;
-    auto const clip = [&t0, &t1](float p, float q) {
-        if (std::abs(p) <= 0.001f) {
-            return q >= 0.0f;
-        }
-        auto const ratio = q / p;
-        if (p < 0.0f) {
-            t0 = std::max(t0, ratio);
-        } else {
-            t1 = std::min(t1, ratio);
-        }
-        return t0 <= t1;
-    };
-    if (!clip(-delta.x, start.x - minX) || !clip(delta.x, maxX - start.x) || !clip(-delta.y, start.y - minY)
-        || !clip(delta.y, maxY - start.y)) {
-        return;
-    }
-
-    auto const clippedStart  = start + delta * t0;
-    auto const clippedEnd    = start + delta * t1;
-    auto const clippedDelta  = clippedEnd - clippedStart;
-    auto const clippedLength = glm::length(clippedDelta);
-    if (clippedLength <= 0.001f) {
-        return;
-    }
-    auto const steps = std::clamp(static_cast<int>(std::ceil(clippedLength / 3.0f)), 1, 128);
-    for (int i = 0; i <= steps; ++i) {
-        auto const point = clippedStart + clippedDelta * (static_cast<float>(i) / static_cast<float>(steps));
-        context
-            .fillRectangle(RectangleArea{point.x - 1.5f, point.x + 1.5f, point.y - 1.5f, point.y + 1.5f}, color, 1.0f);
-    }
+PrimitiveShapeDataPayload makeRemovedShape(std::uint64_t id) {
+    PrimitiveShapeDataPayload shape{};
+    shape.mNetworkId = id;
+    return shape;
 }
 
-void drawCollisionBox(
-    MinecraftUIRenderContext& context,
-    mce::Camera const&        camera,
-    Vec3 const&               cameraPosition,
-    AABB const&               box
-) {
-    std::array<Vec3, 8> corners{
-        Vec3{box.min.x, box.min.y, box.min.z},
-        Vec3{box.max.x, box.min.y, box.min.z},
-        Vec3{box.min.x, box.max.y, box.min.z},
-        Vec3{box.max.x, box.max.y, box.min.z},
-        Vec3{box.min.x, box.min.y, box.max.z},
-        Vec3{box.max.x, box.min.y, box.max.z},
-        Vec3{box.min.x, box.max.y, box.max.z},
-        Vec3{box.max.x, box.max.y, box.max.z}
-    };
-    std::array<glm::vec2, 8> projected{};
-    std::array<bool, 8>      visible{};
-    for (std::size_t i = 0; i < corners.size(); ++i) {
-        float x = 0.0f;
-        float y = 0.0f;
-        if (projectToScreen(context, camera, cameraPosition, corners[i], x, y)) {
-            projected[i] = {x, y};
-            visible[i]   = true;
-        }
-    }
+void sendShapes(std::vector<PrimitiveShapeDataPayload> shapes) {
+    PrimitiveShapesPacket packet{};
+    packet.setSerializationMode(SerializationMode::CerealOnly);
+    packet.mShapes.get() = std::move(shapes);
+    packet.sendToClients();
+}
 
-    constexpr std::array<std::array<std::size_t, 2>, 12> edges{
-        {{{0, 1}},
-         {{0, 2}},
-         {{0, 4}},
-         {{1, 3}},
-         {{1, 5}},
-         {{2, 3}},
-         {{2, 6}},
-         {{3, 7}},
-         {{4, 5}},
-         {{4, 6}},
-         {{5, 7}},
-         {{6, 7}}}
-    };
-    auto const bounds = context.getFullClippingRectangle();
-    auto const color  = mce::Color{0.2f, 0.9f, 1.0f, 1.0f};
-    for (auto const& edge : edges) {
-        if (visible[edge[0]] && visible[edge[1]]) {
-            drawClippedLine(context, bounds, projected[edge[0]], projected[edge[1]], color);
-        }
+std::vector<PrimitiveShapeDataPayload> makeRemovalShapes() {
+    std::vector<PrimitiveShapeDataPayload> shapes;
+    shapes.reserve(kMaxDebugTextLines + 1);
+    for (std::size_t i = 0; i < kMaxDebugTextLines; ++i) {
+        shapes.push_back(makeRemovedShape(kShapeIdBase + i));
     }
+    shapes.push_back(makeRemovedShape(kBoxShapeId));
+    return shapes;
 }
 
 } // namespace
@@ -328,7 +224,7 @@ bool EntityDebugOverlay::enable() {
             auto const selected  = mSelectedRuntimeId.load();
             auto const next      = selected == runtimeId ? 0 : runtimeId;
             mSelectedRuntimeId.store(next);
-            mSelectionGeneration.fetch_add(1);
+            auto const generation = mSelectionGeneration.fetch_add(1) + 1;
             {
                 std::scoped_lock lock(mBehaviorRefreshMutex);
                 mNextBehaviorRefresh = {};
@@ -336,6 +232,13 @@ bool EntityDebugOverlay::enable() {
             {
                 std::scoped_lock lock(mBehaviorSnapshotMutex);
                 mBehaviorSnapshot = {};
+            }
+            {
+                std::scoped_lock lock(mShapeRefreshMutex);
+                mNextShapeRefresh = {};
+            }
+            if (next == 0) {
+                queueShapeRemoval(generation);
             }
             CreatorTools::getInstance().getSelf().getLogger().info(
                 "Entity debug label {} for runtime ID {}",
@@ -346,7 +249,7 @@ bool EntityDebugOverlay::enable() {
     );
 
     mRenderListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::BeforeUIRenderEvent>(
-        [this](ll::event::BeforeUIRenderEvent& event) {
+        [this](ll::event::BeforeUIRenderEvent&) {
             auto client = ll::service::getClientInstance();
             if (!client || !client->isWorldActive()) {
                 clearSelection();
@@ -363,7 +266,7 @@ bool EntityDebugOverlay::enable() {
             auto const generation = mSelectionGeneration.load();
             auto&      logger     = CreatorTools::getInstance().getSelf().getLogger();
             if (mLastRenderLogGeneration != generation) {
-                logger.info("Entity debug renderer active for runtime ID {}", runtimeId);
+                logger.info("Entity debug world-space renderer active for runtime ID {}", runtimeId);
                 mLastRenderLogGeneration = generation;
             }
 
@@ -381,158 +284,7 @@ bool EntityDebugOverlay::enable() {
             }
 
             requestBehaviorSnapshot(runtimeId);
-
-            auto const  frameAlpha           = client->getFrameAlpha();
-            auto const& box                  = target->getAABB();
-            auto const  targetRenderPosition = target->getInterpolatedPosition(frameAlpha);
-            auto const  targetOffset         = targetRenderPosition - target->getPosition();
-            AABB const  renderBox{box.min + targetOffset, box.max + targetOffset};
-            Vec3        labelPosition{
-                (renderBox.min.x + renderBox.max.x) * 0.5f,
-                renderBox.max.y + 0.2f,
-                (renderBox.min.z + renderBox.max.z) * 0.5f
-            };
-            auto* localPlayer = client->getLocalPlayer();
-            if (!localPlayer) {
-                logger.warn("Entity debug: local player is unavailable for projection");
-                return;
-            }
-            auto const cameraPosition = localPlayer->getInterpolatedPosition(frameAlpha)
-                                      + (localPlayer->getEyePos() - localPlayer->getPosition());
-
-            float       screenX = 0.0f;
-            float       screenY = 0.0f;
-            std::string projectionFailure;
-            glm::vec4   cameraSpace{};
-            glm::vec4   clip{};
-            glm::vec2   ndc{};
-            auto&       context = event.uiRenderContext();
-            auto const& camera  = client->getCamera();
-            drawCollisionBox(context, camera, cameraPosition, renderBox);
-            auto const projected = projectToScreen(
-                context,
-                camera,
-                cameraPosition,
-                labelPosition,
-                screenX,
-                screenY,
-                projectionFailure,
-                cameraSpace,
-                clip,
-                ndc
-            );
-            auto const now = std::chrono::steady_clock::now();
-            if (now >= mNextProjectionDiagnostic) {
-                auto const bounds = context.getFullClippingRectangle();
-                logger.info(
-                    "Entity debug projection id={} result={} anchor={} cameraPos=({:.2f},{:.2f},{:.2f}) "
-                    "forward=({:.2f},{:.2f},{:.2f}) right=({:.2f},{:.2f},{:.2f}) up=({:.2f},{:.2f},{:.2f}) "
-                    "cameraSpace=({:.2f},{:.2f},{:.2f},{:.2f}) fov={:.3f} fovFallback={} aspect={:.3f} "
-                    "ndc=({:.3f},{:.3f}) uiBounds=({:.1f},{:.1f})-({:.1f},{:.1f}) screen=({:.1f},{:.1f})",
-                    runtimeId,
-                    projected ? "ok" : projectionFailure,
-                    labelPosition.toString(),
-                    cameraPosition.x,
-                    cameraPosition.y,
-                    cameraPosition.z,
-                    camera.mForward->x,
-                    camera.mForward->y,
-                    camera.mForward->z,
-                    camera.mRight->x,
-                    camera.mRight->y,
-                    camera.mRight->z,
-                    camera.mUp->x,
-                    camera.mUp->y,
-                    camera.mUp->z,
-                    cameraSpace.x,
-                    cameraSpace.y,
-                    cameraSpace.z,
-                    cameraSpace.w,
-                    static_cast<float>(camera.mFov),
-                    static_cast<float>(camera.mFov) <= 0.001f,
-                    static_cast<float>(camera.mAspectRatio),
-                    ndc.x,
-                    ndc.y,
-                    static_cast<float>(bounds._x0),
-                    static_cast<float>(bounds._y0),
-                    static_cast<float>(bounds._x1),
-                    static_cast<float>(bounds._y1),
-                    screenX,
-                    screenY
-                );
-                mNextProjectionDiagnostic = now + std::chrono::seconds{1};
-            }
-            if (!projected) {
-                if (mLastProjectionWarningGeneration != generation) {
-                    logger.warn("Entity debug: could not project entity {} ({})", runtimeId, projectionFailure);
-                    mLastProjectionWarningGeneration = generation;
-                }
-                return;
-            }
-
-            std::vector<std::pair<std::string, bool>> lines;
-            lines.emplace_back(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()), false);
-
-            auto const position = target->getPosition();
-            auto const velocity = target->getVelocity();
-            lines.emplace_back(
-                fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z),
-                false
-            );
-            lines.emplace_back(
-                fmt::format("Velocity: {:.1f}, {:.1f}, {:.1f}", velocity.x, velocity.y, velocity.z),
-                false
-            );
-
-            BehaviorSnapshot snapshot;
-            {
-                std::scoped_lock lock(mBehaviorSnapshotMutex);
-                if (mBehaviorSnapshot.runtimeId == runtimeId) {
-                    snapshot = mBehaviorSnapshot;
-                }
-            }
-
-            if (!snapshot.ready) {
-                lines.emplace_back("Behaviors: checking...", false);
-            } else if (!snapshot.available) {
-                lines.emplace_back("Behaviors: unavailable", false);
-            } else {
-                lines.emplace_back("Behaviors:", false);
-                if (!snapshot.treeName.empty()) {
-                    lines.emplace_back("Behavior tree: " + snapshot.treeName, false);
-                }
-                auto const visibleCount = std::min(snapshot.names.size(), kMaxDisplayedBehaviors);
-                for (std::size_t i = 0; i < visibleCount; ++i) {
-                    auto const& name = snapshot.names[i];
-                    lines.emplace_back(name, !snapshot.activeName.empty() && name == snapshot.activeName);
-                }
-                if (snapshot.names.size() > visibleCount) {
-                    lines.emplace_back(fmt::format("... and {} more", snapshot.names.size() - visibleCount), false);
-                }
-                if (snapshot.names.empty() && snapshot.activeName.empty()) {
-                    lines.emplace_back("No behavior entries", false);
-                }
-                if (!snapshot.activeName.empty()
-                    && std::none_of(snapshot.names.begin(), snapshot.names.end(), [&snapshot](std::string const& name) {
-                           return name == snapshot.activeName;
-                       })) {
-                    lines.emplace_back(snapshot.activeName, true);
-                }
-            }
-
-            auto const      bounds     = context.getFullClippingRectangle();
-            constexpr float lineHeight = 10.0f;
-            float           y = std::max(bounds._y0, screenY - lineHeight * static_cast<float>(lines.size()) - 4.0f);
-            TextMeasureData const  textData{1.0f, 0.0f, true, false, false, ui::TextAlignment::Center};
-            CaretMeasureData const caretData{0, false};
-
-            for (auto& [text, active] : lines) {
-                RectangleArea const area{screenX - 160.0f, screenX + 160.0f, y, y + lineHeight};
-                auto const color = active ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
-                context
-                    .drawDebugText(area, std::move(text), color, 1.0f, ui::TextAlignment::Center, textData, caretData);
-                y += lineHeight;
-            }
+            queueShapeUpdate(runtimeId, generation);
         }
     );
 
@@ -546,14 +298,24 @@ void EntityDebugOverlay::disable() {
 }
 
 void EntityDebugOverlay::clearSelection() {
-    mSelectedRuntimeId.store(0);
-    mSelectionGeneration.fetch_add(1);
+    if (mSelectedRuntimeId.exchange(0) == 0) {
+        return;
+    }
+
+    auto const generation = mSelectionGeneration.fetch_add(1) + 1;
     {
         std::scoped_lock lock(mBehaviorRefreshMutex);
         mNextBehaviorRefresh = {};
     }
-    std::scoped_lock lock(mBehaviorSnapshotMutex);
-    mBehaviorSnapshot = {};
+    {
+        std::scoped_lock lock(mBehaviorSnapshotMutex);
+        mBehaviorSnapshot = {};
+    }
+    {
+        std::scoped_lock lock(mShapeRefreshMutex);
+        mNextShapeRefresh = {};
+    }
+    queueShapeRemoval(generation);
 }
 
 void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId) {
@@ -615,6 +377,153 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId) {
             return;
         }
         mBehaviorSnapshot = std::move(snapshot);
+    });
+}
+
+void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation) {
+    auto const now = std::chrono::steady_clock::now();
+    {
+        std::scoped_lock lock(mShapeRefreshMutex);
+        if (now < mNextShapeRefresh) {
+            return;
+        }
+        mNextShapeRefresh = now + kShapeRefreshInterval;
+    }
+
+    auto& logger = CreatorTools::getInstance().getSelf().getLogger();
+    if (!ll::service::getServerInstance()) {
+        if (mLastShapeWarningGeneration.exchange(generation) != generation) {
+            logger.warn("Entity debug world-space shapes require a local world with an integrated server");
+        }
+        return;
+    }
+
+    ll::thread::ServerThreadExecutor::getDefault().execute([this, runtimeId, generation] {
+        if (mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != runtimeId) {
+            return;
+        }
+
+        auto level = ll::service::getLevel();
+        auto* target = level ? level->getRuntimeEntity(ActorRuntimeID{runtimeId}, false) : nullptr;
+        if (!target) {
+            if (mLastShapeWarningGeneration.exchange(generation) != generation) {
+                CreatorTools::getInstance().getSelf().getLogger().warn(
+                    "Entity debug: entity {} is not present in the local server level",
+                    runtimeId
+                );
+            }
+            sendShapes(makeRemovalShapes());
+            mActiveTextShapeCount = 0;
+            return;
+        }
+
+        std::vector<DebugTextLine> lines;
+        lines.emplace_back(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()), false);
+
+        auto const position = target->getPosition();
+        auto const velocity = target->getVelocity();
+        lines.emplace_back(
+            fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z),
+            false
+        );
+        lines.emplace_back(
+            fmt::format("Velocity: {:.1f}, {:.1f}, {:.1f}", velocity.x, velocity.y, velocity.z),
+            false
+        );
+
+        BehaviorSnapshot snapshot;
+        {
+            std::scoped_lock lock(mBehaviorSnapshotMutex);
+            if (mBehaviorSnapshot.runtimeId == runtimeId) {
+                snapshot = mBehaviorSnapshot;
+            }
+        }
+
+        if (!snapshot.ready) {
+            lines.emplace_back("Behaviors: checking...", false);
+        } else if (!snapshot.available) {
+            lines.emplace_back("Behaviors: unavailable", false);
+        } else {
+            lines.emplace_back("Behaviors:", false);
+            if (!snapshot.treeName.empty()) {
+                lines.emplace_back("Behavior tree: " + snapshot.treeName, false);
+            }
+            auto const visibleCount = std::min(snapshot.names.size(), kMaxDisplayedBehaviors);
+            for (std::size_t i = 0; i < visibleCount; ++i) {
+                auto const& name = snapshot.names[i];
+                lines.emplace_back(name, !snapshot.activeName.empty() && name == snapshot.activeName);
+            }
+            if (snapshot.names.size() > visibleCount) {
+                lines.emplace_back(fmt::format("... and {} more", snapshot.names.size() - visibleCount), false);
+            }
+            if (snapshot.names.empty() && snapshot.activeName.empty()) {
+                lines.emplace_back("No behavior entries", false);
+            }
+            if (!snapshot.activeName.empty()
+                && std::none_of(snapshot.names.begin(), snapshot.names.end(), [&snapshot](std::string const& name) {
+                       return name == snapshot.activeName;
+                   })) {
+                lines.emplace_back(snapshot.activeName, true);
+            }
+        }
+
+        if (lines.size() > kMaxDebugTextLines) {
+            lines.resize(kMaxDebugTextLines);
+        }
+
+        auto const& bounds = target->getAABB();
+        auto const dimension = target->getDimensionId();
+        auto const entityPosition = target->getPosition();
+        auto const attachedTo = target->getOrCreateUniqueID();
+        auto const centerX = (bounds.min.x + bounds.max.x) * 0.5f;
+        auto const centerY = (bounds.min.y + bounds.max.y) * 0.5f;
+        auto const centerZ = (bounds.min.z + bounds.max.z) * 0.5f;
+
+        std::vector<PrimitiveShapeDataPayload> shapes;
+        shapes.reserve(lines.size() + mActiveTextShapeCount + 1);
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            auto const height = bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * 0.24f;
+            auto const color = lines[i].second ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f}
+                                               : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
+            shapes.push_back(makeTextShape(
+                kShapeIdBase + i,
+                Vec3{
+                    centerX - entityPosition.x,
+                    height - entityPosition.y,
+                    centerZ - entityPosition.z
+                },
+                std::move(lines[i].first),
+                color,
+                dimension,
+                attachedTo
+            ));
+        }
+        for (std::size_t i = lines.size(); i < mActiveTextShapeCount; ++i) {
+            shapes.push_back(makeRemovedShape(kShapeIdBase + i));
+        }
+        shapes.push_back(makeBoxShape(
+            kBoxShapeId,
+            bounds,
+            Vec3{centerX - entityPosition.x, centerY - entityPosition.y, centerZ - entityPosition.z},
+            dimension,
+            attachedTo
+        ));
+        sendShapes(std::move(shapes));
+        mActiveTextShapeCount = lines.size();
+    });
+}
+
+void EntityDebugOverlay::queueShapeRemoval(std::uint64_t generation) {
+    if (!ll::service::getServerInstance()) {
+        return;
+    }
+
+    ll::thread::ServerThreadExecutor::getDefault().execute([this, generation] {
+        if (mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != 0) {
+            return;
+        }
+        sendShapes(makeRemovalShapes());
+        mActiveTextShapeCount = 0;
     });
 }
 
