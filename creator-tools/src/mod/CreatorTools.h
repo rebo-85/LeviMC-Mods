@@ -5,7 +5,10 @@
 #include "ll/api/event/ListenerBase.h"
 #include "ll/api/mod/NativeMod.h"
 
+#include <atomic>
 #include <chrono>
+#include <optional>
+#include <string>
 
 namespace creator_tools {
 
@@ -35,9 +38,15 @@ private:
     ll::mod::NativeMod&                   mSelf;
     EntityDebugOverlay                    mEntityDebugOverlay;
     ll::event::ListenerPtr                mListener;
+    ll::event::ListenerPtr                mWorldReentryListener;
+    std::optional<std::string>            mWorldToReenter;
     bool                                  mGPressed{false};
     bool                                  mRPressed{false};
+    std::atomic_bool                      mWorldReentryCheckQueued{false};
     std::chrono::steady_clock::time_point mLastGamemodeSwitch{};
+
+    void reloadBehaviorResourcesAndReenterWorld();
+    void startWorldAfterShutdown();
 };
 
 } // namespace creator_tools
