@@ -18,7 +18,9 @@
 #include "mc/network/packet/PrimitiveShapesPacket.h"
 #include "mc/network/packet/TextDataPayload.h"
 #include "mc/scripting/modules/minecraft/primitiveshapes/ScriptPrimitiveShapeType.h"
+#include "mc/util/NamedMolangScript.h"
 #include "mc/world/actor/Actor.h"
+#include "mc/world/actor/ActorDefinition.h"
 #include "mc/world/actor/bhave/BehaviorStatus.h"
 #include "mc/world/actor/bhave/definition/BehaviorDefinition.h"
 #include "mc/world/actor/bhave/definition/BehaviorTreeDefinition.h"
@@ -283,7 +285,7 @@ bool EntityDebugOverlay::enable() {
                 return;
             }
 
-            requestBehaviorSnapshot(runtimeId);
+            requestBehaviorSnapshot(runtimeId, target->getOrCreateUniqueID().rawID);
             queueShapeUpdate(runtimeId, generation);
         }
     );
@@ -318,7 +320,7 @@ void EntityDebugOverlay::clearSelection() {
     queueShapeRemoval(generation);
 }
 
-void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId) {
+void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId) {
     auto const now = std::chrono::steady_clock::now();
     {
         std::scoped_lock lock(mBehaviorRefreshMutex);
@@ -341,22 +343,30 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId) {
         if (mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != runtimeId) {
             return;
         }
-        mBehaviorSnapshot = BehaviorSnapshot{runtimeId, true, false, {}, {}, {}};
+        mBehaviorSnapshot = BehaviorSnapshot{runtimeId, true, false, false, {}, {}, {}};
         return;
     }
 
-    ll::thread::ServerThreadExecutor::getDefault().execute([this, runtimeId, generation] {
+    ll::thread::ServerThreadExecutor::getDefault().execute([this, runtimeId, uniqueId, generation] {
         BehaviorSnapshot snapshot;
         snapshot.runtimeId = runtimeId;
         snapshot.ready     = true;
 
         auto level = ll::service::getLevel();
         if (level) {
-            auto* target = level->getRuntimeEntity(ActorRuntimeID{runtimeId}, false);
+            auto* target = level->fetchEntity(ActorUniqueID{uniqueId}, false);
             if (target) {
+                auto const* actorDefinition = target->mActorDefinitionPtr->mPtr;
+                if (actorDefinition) {
+                    if (auto const* behaviorDescription = actorDefinition->mDescription->mBehavior) {
+                        snapshot.treeName = behaviorDescription->mBehaviorTreeId.get();
+                    }
+                }
+
                 auto component = target->getEntityContext().tryGetComponent<BehaviorComponent>();
                 if (component) {
                     snapshot.available = true;
+                    snapshot.runtimeStateAvailable = true;
 
                     auto const* tree = component->mTreeDefinition->mPtr;
                     if (tree) {
@@ -368,6 +378,8 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId) {
                         active && active->mNodeDefinition) {
                         snapshot.activeName = active->mNodeDefinition->mName.get();
                     }
+                } else if (!snapshot.treeName.empty()) {
+                    snapshot.available = true;
                 }
             }
         }
@@ -421,13 +433,8 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         lines.emplace_back(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()), false);
 
         auto const position = target->getPosition();
-        auto const velocity = target->getVelocity();
         lines.emplace_back(
             fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z),
-            false
-        );
-        lines.emplace_back(
-            fmt::format("Velocity: {:.1f}, {:.1f}, {:.1f}", velocity.x, velocity.y, velocity.z),
             false
         );
 
@@ -442,7 +449,7 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         if (!snapshot.ready) {
             lines.emplace_back("Behaviors: checking...", false);
         } else if (!snapshot.available) {
-            lines.emplace_back("Behaviors: unavailable", false);
+            lines.emplace_back("No behavior tree", false);
         } else {
             lines.emplace_back("Behaviors:", false);
             if (!snapshot.treeName.empty()) {
@@ -456,8 +463,10 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
             if (snapshot.names.size() > visibleCount) {
                 lines.emplace_back(fmt::format("... and {} more", snapshot.names.size() - visibleCount), false);
             }
-            if (snapshot.names.empty() && snapshot.activeName.empty()) {
+            if (snapshot.names.empty() && snapshot.activeName.empty() && snapshot.runtimeStateAvailable) {
                 lines.emplace_back("No behavior entries", false);
+            } else if (!snapshot.runtimeStateAvailable) {
+                lines.emplace_back("Runtime behavior state unavailable", false);
             }
             if (!snapshot.activeName.empty()
                 && std::none_of(snapshot.names.begin(), snapshot.names.end(), [&snapshot](std::string const& name) {

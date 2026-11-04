@@ -29,7 +29,7 @@ This makes the mod helpful for creators iterating on map layouts, tests, and vis
 
 ### Entity debug label
 
-Aim at an entity and Ctrl + right-click to show world-space text above it with health, position, velocity, and behavior-tree details, plus a wireframe of its collision box. The shapes attach to the entity, so Minecraft tracks their position without screen-space projection. Ctrl + right-click the selected entity again to hide it, or select a different entity to switch the label. This uses Minecraft's native primitive-shape packets and requires a local world with an integrated server; it is not available on remote servers.
+Aim at an entity and Ctrl + right-click to show world-space text above it with health, position, and behavior-tree details, plus a wireframe of its collision box. The shapes attach to the entity, so Minecraft tracks their position without screen-space projection. Ctrl + right-click the selected entity again to hide it, or select a different entity to switch the label. This uses Minecraft's native primitive-shape packets and requires a local world with an integrated server; it is not available on remote servers.
 
 Behavior details are read from the local world's integrated server, with the currently running behavior highlighted green.
 

@@ -22,13 +22,14 @@ private:
         std::uint64_t            runtimeId{};
         bool                     ready{};
         bool                     available{};
+        bool                     runtimeStateAvailable{};
         std::string              treeName;
         std::vector<std::string> names;
         std::string              activeName;
     };
 
     void clearSelection();
-    void requestBehaviorSnapshot(std::uint64_t runtimeId);
+    void requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId);
     void queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation);
     void queueShapeRemoval(std::uint64_t generation);
 
