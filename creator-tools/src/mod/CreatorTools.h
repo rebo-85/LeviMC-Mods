@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mod/EntityDebugOverlay.h"
+
 #include "ll/api/event/ListenerBase.h"
 #include "ll/api/mod/NativeMod.h"
 
@@ -31,8 +33,10 @@ public:
 
 private:
     ll::mod::NativeMod&                   mSelf;
+    EntityDebugOverlay                    mEntityDebugOverlay;
     ll::event::ListenerPtr                mListener;
     bool                                  mGPressed{false};
+    bool                                  mRPressed{false};
     std::chrono::steady_clock::time_point mLastGamemodeSwitch{};
 };
 

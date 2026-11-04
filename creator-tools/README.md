@@ -1,29 +1,38 @@
-# LeviLamina Mod Template
+# Creator Tools Mod
 
-> [!WARNING]
-> Remember to change the [LICENSE](LICENSE) file when you use this template
+Creator Tools is a small LeviLamina utility mod designed to speed up creator-style gameplay workflows in Minecraft. It adds fast keyboard shortcuts for switching game modes and reloading client-side or server-side resources without needing to dig through menus.
 
-Mod Template for LeviLamina
+## Overview
 
-## Usage
+The mod is intentionally focused and lightweight:
 
-For detailed instructions, see the [LeviLamina Documentation](https://docs.levimc.org/LeviLamina/developer_guides/tutorials/create_your_first_mod/)
+- G: cycles the local player's game mode in order: Survival -> Creative -> Adventure -> Spectator
+- Ctrl + R: requests a behavior-resource reload on a local world, or sends `/reload` to a remote server
+- Shift + R: refreshes client packs, then reloads animations, geometries, textures, and UI resources
+- Ctrl + right-click: toggles a floating debug label for the targeted entity in local worlds
 
-1. Generate a new repository from this template
-2. Clone the new repository
-3. Change the mod name and the expected LeviLamina version in `xmake.lua`
-4. Add your code.
-5. Run `xmake f -y -p windows -a x64 -m release` in the root of the repository
-6. Run `xmake` to build the mod.
+These actions are only triggered when Minecraft is the active foreground window and the player is in gameplay, which helps avoid accidental input while menus or chat are open.
 
-After a successful build, you will find mod in `bin/`
+## Features
 
-## Contributing
+### Game mode cycling
 
-Ask questions by creating an issue.
+Pressing G changes the active local player's game mode to the next mode in the standard cycle. This is useful for testing builds, creative movement, and quick world editing.
 
-PRs accepted.
+### Fast reloads
 
-## License
+- Ctrl + R requests a server-side behavior-resource reload for a local world
+- Ctrl + R sends `/reload` when connected to a remote server
+- Shift + R refreshes client packs and reloads client-side assets without leaving the game flow
 
-CC0-1.0 © LeviMC(LiteLDev)
+This makes the mod helpful for creators iterating on map layouts, tests, and visual adjustments.
+
+### Entity debug label
+
+Aim at an entity and Ctrl + right-click to show a floating label above it with health, position, velocity, and behavior-tree details, plus a wireframe of its collision box. The label follows the entity without changing its name tag. Ctrl + right-click the selected entity again to hide it, or select a different entity to switch the label.
+
+Behavior details are read from the local world's integrated server; they are unavailable for entities on remote servers.
+
+## Project status
+
+This mod is built for creator-focused testing and editing workflows inside LeviLamina-based Minecraft environments.
