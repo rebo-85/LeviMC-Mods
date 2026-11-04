@@ -15,6 +15,11 @@ namespace creator_tools {
 class CreatorTools {
 
 public:
+    struct PendingReentry {
+        std::string                           worldId;
+        std::chrono::steady_clock::time_point deadline;
+    };
+
     static CreatorTools& getInstance();
 
     CreatorTools() : mSelf(*ll::mod::NativeMod::current()) {}
@@ -39,7 +44,8 @@ private:
     EntityDebugOverlay                    mEntityDebugOverlay;
     ll::event::ListenerPtr                mListener;
     ll::event::ListenerPtr                mWorldReentryListener;
-    std::optional<std::string>            mWorldToReenter;
+    std::optional<PendingReentry>         mPendingReentry;
+    std::atomic_bool                      mReentryPending{false};
     bool                                  mGPressed{false};
     bool                                  mRPressed{false};
     std::atomic_bool                      mWorldReentryCheckQueued{false};
@@ -47,6 +53,8 @@ private:
 
     void reloadBehaviorResourcesAndReenterWorld();
     void startWorldAfterShutdown();
+    void beginReentry(std::string worldId);
+    void clearReentry();
 };
 
 } // namespace creator_tools

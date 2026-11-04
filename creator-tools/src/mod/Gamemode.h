@@ -12,7 +12,9 @@ namespace creator_tools::gamemode {
 
 [[nodiscard]] std::string_view name(GameType mode);
 
-/// Cycles the local player's gamemode. Returns false if no player/level is available.
+/// Requests the next gamemode in the cycle by sending `/gamemode <mode>` to the server, so it works on
+/// local and remote worlds but needs permission to use the command (cheats / operator).
+/// Returns false if no player/level/connection is available. Must be called on the client thread.
 bool cycleLocalPlayer();
 
 } // namespace creator_tools::gamemode

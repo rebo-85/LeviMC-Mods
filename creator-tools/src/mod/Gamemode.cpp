@@ -1,5 +1,6 @@
 #include "mod/Gamemode.h"
 
+#include "mod/ClientCommands.h"
 #include "mod/CreatorTools.h"
 
 #include "ll/api/service/Bedrock.h"
@@ -21,6 +22,22 @@ constexpr std::array kCycle{
     GameType::Adventure,
     GameType::Spectator,
 };
+
+// Argument accepted by the /gamemode command, or empty for modes outside the cycle.
+std::string_view commandArg(GameType mode) {
+    switch (mode) {
+    case GameType::Survival:
+        return "survival";
+    case GameType::Creative:
+        return "creative";
+    case GameType::Adventure:
+        return "adventure";
+    case GameType::Spectator:
+        return "spectator";
+    default:
+        return {};
+    }
+}
 
 } // namespace
 
@@ -47,26 +64,6 @@ std::string_view name(GameType mode) {
     }
 }
 
-std::string_view gameModeTranslationKey(GameType mode) {
-    switch (mode) {
-    case GameType::Survival:
-        return "gameMode.survival";
-    case GameType::Creative:
-        return "gameMode.creative";
-    case GameType::Adventure:
-        return "gameMode.adventure";
-    case GameType::Spectator:
-        return "gameMode.spectator";
-    default:
-        return "";
-    }
-}
-
-void sendGameModeMessage(Player& player, GameType mode) {
-    std::string_view modeName = name(mode);
-    player.sendMessage("Set own game mode to " + std::string{modeName});
-}
-
 bool cycleLocalPlayer() {
     auto& creatorTools = CreatorTools::getInstance();
     auto& log          = creatorTools.getSelf().getLogger();
@@ -86,11 +83,20 @@ bool cycleLocalPlayer() {
 
     auto const current = player->getPlayerGameType();
     auto const target  = next(current);
+    auto const arg     = commandArg(target);
+    if (arg.empty()) {
+        log.warn("No /gamemode argument for target mode {}", name(target));
+        return false;
+    }
 
-    player->setPlayerGameType(target);
-    sendGameModeMessage(*player, target);
+    // Go through the server instead of calling setPlayerGameType on the client-side player, which
+    // only changes client state and can desync from the server. The server replies with its own
+    // confirmation (or a permission error) in chat, so no extra message is shown here.
+    if (!sendCommand("/gamemode " + std::string{arg})) {
+        return false;
+    }
 
-    log.info("Gamemode {} -> {}", name(current), name(target));
+    log.info("Requested gamemode {} -> {}", name(current), name(target));
     return true;
 }
 

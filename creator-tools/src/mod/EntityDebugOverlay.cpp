@@ -50,12 +50,12 @@ namespace creator_tools {
 
 namespace {
 
-constexpr auto        kBehaviorRefreshInterval = std::chrono::milliseconds{250};
-constexpr auto        kShapeRefreshInterval    = std::chrono::milliseconds{100};
-constexpr std::size_t kMaxDisplayedBehaviors   = 8;
-constexpr std::size_t kMaxDebugTextLines       = 16;
-constexpr std::uint64_t kShapeIdBase           = 0x43544F4F4C530000ULL;
-constexpr std::uint64_t kBoxShapeId            = kShapeIdBase + kMaxDebugTextLines;
+constexpr auto          kBehaviorRefreshInterval = std::chrono::milliseconds{250};
+constexpr auto          kShapeRefreshInterval    = std::chrono::milliseconds{100};
+constexpr std::size_t   kMaxDisplayedBehaviors   = 8;
+constexpr std::size_t   kMaxDebugTextLines       = 16;
+constexpr std::uint64_t kShapeIdBase             = 0x43544F4F4C530000ULL;
+constexpr std::uint64_t kBoxShapeId              = kShapeIdBase + kMaxDebugTextLines;
 
 using DebugTextLine = std::pair<std::string, bool>;
 
@@ -123,20 +123,20 @@ BehaviorNode const* getRunningLeaf(BehaviorNode const* node) {
 }
 
 PrimitiveShapeDataPayload makeTextShape(
-    std::uint64_t  id,
-    Vec3 const&    locationOffset,
-    std::string    text,
-    mce::Color     color,
-    DimensionType  dimension,
-    ActorUniqueID  attachedTo
+    std::uint64_t id,
+    Vec3 const&   locationOffset,
+    std::string   text,
+    mce::Color    color,
+    DimensionType dimension,
+    ActorUniqueID attachedTo
 ) {
     PrimitiveShapeDataPayload shape{};
-    shape.mNetworkId          = id;
-    shape.mShapeType          = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Text;
-    shape.mLocation           = locationOffset;
-    shape.mColor              = color;
-    shape.mDimensionId        = dimension;
-    shape.mAttachedToId       = attachedTo;
+    shape.mNetworkId         = id;
+    shape.mShapeType         = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Text;
+    shape.mLocation          = locationOffset;
+    shape.mColor             = color;
+    shape.mDimensionId       = dimension;
+    shape.mAttachedToId      = attachedTo;
     shape.mMaxRenderDistance = 64.0f;
 
     TextDataPayload textPayload{};
@@ -148,24 +148,22 @@ PrimitiveShapeDataPayload makeTextShape(
 
 PrimitiveShapeDataPayload makeBoxShape(
     std::uint64_t id,
-    AABB const&  bounds,
-    Vec3 const&  locationOffset,
+    AABB const&   bounds,
+    Vec3 const&   locationOffset,
     DimensionType dimension,
     ActorUniqueID attachedTo
 ) {
     PrimitiveShapeDataPayload shape{};
-    shape.mNetworkId          = id;
-    shape.mShapeType          = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Box;
-    shape.mLocation           = locationOffset;
-    shape.mColor              = mce::Color{0.2f, 0.9f, 1.0f, 1.0f};
-    shape.mDimensionId        = dimension;
-    shape.mAttachedToId       = attachedTo;
+    shape.mNetworkId         = id;
+    shape.mShapeType         = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Box;
+    shape.mLocation          = locationOffset;
+    shape.mColor             = mce::Color{0.2f, 0.9f, 1.0f, 1.0f};
+    shape.mDimensionId       = dimension;
+    shape.mAttachedToId      = attachedTo;
     shape.mMaxRenderDistance = 64.0f;
-    shape.mExtraDataPayload  = BoxDataPayload{Vec3{
-        bounds.max.x - bounds.min.x,
-        bounds.max.y - bounds.min.y,
-        bounds.max.z - bounds.min.z
-    }};
+    shape.mExtraDataPayload  = BoxDataPayload{
+        Vec3{bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z}
+    };
     return shape;
 }
 
@@ -222,23 +220,15 @@ bool EntityDebugOverlay::enable() {
                 return;
             }
 
+            // Swallow the click so Ctrl+right-click doesn't also trade with / mount / interact with the entity.
+            event.cancel();
+
             auto const runtimeId = static_cast<std::uint64_t>(target->getRuntimeID());
             auto const selected  = mSelectedRuntimeId.load();
             auto const next      = selected == runtimeId ? 0 : runtimeId;
             mSelectedRuntimeId.store(next);
             auto const generation = mSelectionGeneration.fetch_add(1) + 1;
-            {
-                std::scoped_lock lock(mBehaviorRefreshMutex);
-                mNextBehaviorRefresh = {};
-            }
-            {
-                std::scoped_lock lock(mBehaviorSnapshotMutex);
-                mBehaviorSnapshot = {};
-            }
-            {
-                std::scoped_lock lock(mShapeRefreshMutex);
-                mNextShapeRefresh = {};
-            }
+            resetSelectionState();
             if (next == 0) {
                 queueShapeRemoval(generation);
             }
@@ -305,6 +295,11 @@ void EntityDebugOverlay::clearSelection() {
     }
 
     auto const generation = mSelectionGeneration.fetch_add(1) + 1;
+    resetSelectionState();
+    queueShapeRemoval(generation);
+}
+
+void EntityDebugOverlay::resetSelectionState() {
     {
         std::scoped_lock lock(mBehaviorRefreshMutex);
         mNextBehaviorRefresh = {};
@@ -317,7 +312,6 @@ void EntityDebugOverlay::clearSelection() {
         std::scoped_lock lock(mShapeRefreshMutex);
         mNextShapeRefresh = {};
     }
-    queueShapeRemoval(generation);
 }
 
 void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId) {
@@ -365,7 +359,7 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::i
 
                 auto component = target->getEntityContext().tryGetComponent<BehaviorComponent>();
                 if (component) {
-                    snapshot.available = true;
+                    snapshot.available             = true;
                     snapshot.runtimeStateAvailable = true;
 
                     auto const* tree = component->mTreeDefinition->mPtr;
@@ -415,7 +409,7 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
             return;
         }
 
-        auto level = ll::service::getLevel();
+        auto  level  = ll::service::getLevel();
         auto* target = level ? level->getRuntimeEntity(ActorRuntimeID{runtimeId}, false) : nullptr;
         if (!target) {
             if (mLastShapeWarningGeneration.exchange(generation) != generation) {
@@ -433,10 +427,7 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         lines.emplace_back(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()), false);
 
         auto const position = target->getPosition();
-        lines.emplace_back(
-            fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z),
-            false
-        );
+        lines.emplace_back(fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z), false);
 
         BehaviorSnapshot snapshot;
         {
@@ -480,27 +471,23 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
             lines.resize(kMaxDebugTextLines);
         }
 
-        auto const& bounds = target->getAABB();
-        auto const dimension = target->getDimensionId();
-        auto const entityPosition = target->getPosition();
-        auto const attachedTo = target->getOrCreateUniqueID();
-        auto const centerX = (bounds.min.x + bounds.max.x) * 0.5f;
-        auto const centerY = (bounds.min.y + bounds.max.y) * 0.5f;
-        auto const centerZ = (bounds.min.z + bounds.max.z) * 0.5f;
+        auto const& bounds         = target->getAABB();
+        auto const  dimension      = target->getDimensionId();
+        auto const  entityPosition = target->getPosition();
+        auto const  attachedTo     = target->getOrCreateUniqueID();
+        auto const  centerX        = (bounds.min.x + bounds.max.x) * 0.5f;
+        auto const  centerY        = (bounds.min.y + bounds.max.y) * 0.5f;
+        auto const  centerZ        = (bounds.min.z + bounds.max.z) * 0.5f;
 
         std::vector<PrimitiveShapeDataPayload> shapes;
         shapes.reserve(lines.size() + mActiveTextShapeCount + 1);
         for (std::size_t i = 0; i < lines.size(); ++i) {
             auto const height = bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * 0.24f;
-            auto const color = lines[i].second ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f}
-                                               : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
+            auto const color =
+                lines[i].second ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
             shapes.push_back(makeTextShape(
                 kShapeIdBase + i,
-                Vec3{
-                    centerX - entityPosition.x,
-                    height - entityPosition.y,
-                    centerZ - entityPosition.z
-                },
+                Vec3{centerX - entityPosition.x, height - entityPosition.y, centerZ - entityPosition.z},
                 std::move(lines[i].first),
                 color,
                 dimension,

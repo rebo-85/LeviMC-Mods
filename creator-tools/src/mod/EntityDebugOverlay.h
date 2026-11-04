@@ -29,6 +29,7 @@ private:
     };
 
     void clearSelection();
+    void resetSelectionState();
     void requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId);
     void queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation);
     void queueShapeRemoval(std::uint64_t generation);
