@@ -12,6 +12,8 @@
 #include "mc/deps/core/math/Color.h"
 #include "mc/deps/input/MouseAction.h"
 #include "mc/entity/components/BehaviorComponent.h"
+#include "mc/entity/components/GoalSelectorComponent.h"
+#include "mc/entity/components/PrioritizedGoal.h"
 #include "mc/legacy/ActorRuntimeID.h"
 #include "mc/network/packet/BoxDataPayload.h"
 #include "mc/network/packet/PrimitiveShapeDataPayload.h"
@@ -21,6 +23,8 @@
 #include "mc/util/NamedMolangScript.h"
 #include "mc/world/actor/Actor.h"
 #include "mc/world/actor/ActorDefinition.h"
+#include "mc/world/actor/ai/goal/BaseGoal.h"
+#include "mc/world/actor/ai/goal/GoalId.h"
 #include "mc/world/actor/bhave/BehaviorStatus.h"
 #include "mc/world/actor/bhave/definition/BehaviorDefinition.h"
 #include "mc/world/actor/bhave/definition/BehaviorTreeDefinition.h"
@@ -43,6 +47,8 @@
 #include <array>
 #include <chrono>
 #include <fmt/format.h>
+#include <string_view>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -55,9 +61,9 @@ namespace {
 constexpr auto          kBehaviorRefreshInterval = std::chrono::milliseconds{250};
 constexpr auto          kShapeRefreshInterval    = std::chrono::milliseconds{100};
 constexpr auto          kShapeResendInterval     = std::chrono::seconds{2}; // re-send even if unchanged, to self-heal
-constexpr std::size_t   kMaxDisplayedBehaviors   = 8;
+constexpr std::size_t   kMaxDisplayedBehaviors   = 24;
 constexpr std::size_t   kMaxCollectedBehaviors   = 64;
-constexpr std::size_t   kMaxDebugTextLines       = 16;
+constexpr std::size_t   kMaxDebugTextLines       = 32;
 constexpr std::uint64_t kShapeIdBase             = 0x43544F4F4C530000ULL;
 constexpr std::uint64_t kBoxShapeId              = kShapeIdBase + kMaxDebugTextLines;
 
@@ -100,6 +106,52 @@ void collectBehaviorEntries(
     }
 
     add(definition->mName.get());
+}
+
+/// Name shown for a goal: the goal's own name if it has one, else its C++ class name.
+std::string goalDisplayName(BaseGoal const& goal) {
+    auto const& name = goal.mName.get();
+    if (!name.empty()) {
+        return name;
+    }
+    std::string_view type = typeid(goal).name();
+    for (std::string_view prefix : {"class ", "struct "}) {
+        if (type.starts_with(prefix)) {
+            type.remove_prefix(prefix.size());
+        }
+    }
+    return std::string{type};
+}
+
+/// Lists the entity's goal-selector goals (the `minecraft:behavior.*` components) as
+/// "[priority] name", lowest priority number first. `mUsed` is the goal selector's own "running" flag.
+void collectGoalEntries(GoalSelectorComponent const& selector, std::vector<BehaviorEntry>& entries) {
+    std::vector<BehaviorEntry> goals;
+    std::vector<int>           priorities;
+    for (auto const& element : selector.mGoalMap.get()) {
+        auto const& prioritized = element.second;
+        auto const* goal        = prioritized.mGoal.get();
+        if (!goal) {
+            continue;
+        }
+        auto const priority = prioritized.mPriority;
+        goals.push_back(BehaviorEntry{fmt::format("[{}] {}", priority, goalDisplayName(*goal)), 0, prioritized.mUsed});
+        priorities.push_back(priority);
+    }
+
+    std::vector<std::size_t> order(goals.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return priorities[a] < priorities[b];
+    });
+    for (auto index : order) {
+        if (entries.size() >= kMaxCollectedBehaviors) {
+            break;
+        }
+        entries.push_back(std::move(goals[index]));
+    }
 }
 
 BehaviorNode const* getActiveChild(BehaviorNode const& node) {
@@ -290,6 +342,17 @@ bool EntityDebugOverlay::enable() {
             resetSelectionState();
             if (next == 0) {
                 queueShapeRemoval(generation);
+            } else if (selected != 0 && ll::service::getServerInstance()) {
+                // Switching from one mob to another: only one mob may be labelled at a time, so clear the
+                // previous mob's shapes first. The next update (a later frame) then draws the new one.
+                ll::thread::ServerThreadExecutor::getDefault().execute([this, alive = mAlive, generation] {
+                    if (!alive->load() || mSelectionGeneration.load() != generation) {
+                        return;
+                    }
+                    sendShapes(makeRemovalShapes(), mLocalPlayerUniqueId.load());
+                    mActiveTextShapeCount = 0;
+                    mLastSent             = {};
+                });
             }
             CreatorTools::getInstance().getSelf().getLogger().info(
                 "Entity debug label {} for runtime ID {}",
@@ -424,6 +487,15 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::i
                     }
                 }
 
+                // Classic mobs: the goal selector holds the minecraft:behavior.* goals with their priorities.
+                if (auto goalSelector = target->getEntityContext().tryGetComponent<GoalSelectorComponent>()) {
+                    collectGoalEntries(*goalSelector, snapshot.entries);
+                    if (!snapshot.entries.empty()) {
+                        snapshot.available             = true;
+                        snapshot.runtimeStateAvailable = true;
+                    }
+                }
+
                 auto component = target->getEntityContext().tryGetComponent<BehaviorComponent>();
                 if (component) {
                     snapshot.available             = true;
@@ -527,7 +599,7 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         if (!snapshot.ready) {
             addLine("Behaviors: checking...");
         } else if (!snapshot.available) {
-            addLine("No behavior tree");
+            addLine("No behaviors");
         } else {
             addLine("Behaviors:");
             if (!snapshot.treeName.empty()) {

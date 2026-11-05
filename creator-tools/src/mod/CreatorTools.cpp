@@ -208,6 +208,11 @@ void CreatorTools::handleKeyInput(ll::event::KeyInputEvent& event) {
 
     if (!isMinecraftForeground()) {
         releaseKey();
+        // The game must not react to keys typed into another window. Only presses are swallowed;
+        // releases still pass through so a key held while switching windows can't get stuck down.
+        if (event.isDown()) {
+            event.cancel();
+        }
         return;
     }
 
