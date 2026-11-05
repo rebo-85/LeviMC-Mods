@@ -2,6 +2,7 @@
 
 #include "mod/ClientCommands.h"
 #include "mod/CreatorTools.h"
+#include "mod/ServerActions.h"
 
 #include "ll/api/service/Bedrock.h"
 
@@ -10,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <optional>
 #include <string>
 
 namespace creator_tools::gamemode {
@@ -22,6 +25,18 @@ constexpr std::array kCycle{
     GameType::Adventure,
     GameType::Spectator,
 };
+
+// How long a requested mode is trusted before we fall back to the player's actual mode. Covers the
+// round trip to the server so rapid presses keep advancing the cycle instead of repeating one target.
+constexpr auto kPendingTimeout = std::chrono::seconds{2};
+
+struct PendingMode {
+    GameType                              target;
+    std::chrono::steady_clock::time_point expires;
+};
+
+// Client thread only.
+std::optional<PendingMode> gPending;
 
 // Argument accepted by the /gamemode command, or empty for modes outside the cycle.
 std::string_view commandArg(GameType mode) {
@@ -70,7 +85,6 @@ bool cycleLocalPlayer() {
 
     auto level = ll::service::getMultiPlayerLevel();
     if (!level) {
-
         log.warn("No multiplayer level");
         return false;
     }
@@ -81,22 +95,33 @@ bool cycleLocalPlayer() {
         return false;
     }
 
+    auto const now     = std::chrono::steady_clock::now();
     auto const current = player->getPlayerGameType();
-    auto const target  = next(current);
-    auto const arg     = commandArg(target);
+
+    // If we already asked for a mode and the server hasn't applied it yet, continue from that mode.
+    auto base = current;
+    if (gPending && now < gPending->expires && current != gPending->target) {
+        base = gPending->target;
+    }
+
+    auto const target = next(base);
+    auto const arg    = commandArg(target);
     if (arg.empty()) {
         log.warn("No /gamemode argument for target mode {}", name(target));
         return false;
     }
 
-    // Go through the server instead of calling setPlayerGameType on the client-side player, which
-    // only changes client state and can desync from the server. The server replies with its own
-    // confirmation (or a permission error) in chat, so no extra message is shown here.
-    if (!sendCommand("/gamemode " + std::string{arg})) {
+    // Local world: call the integrated server's Player API directly (no command packet, no cheats
+    // needed). Remote world: there is no API to reach the server, so a /gamemode command is the only way.
+    bool const ok =
+        server::hasLocalServer() ? server::setLocalGameType(target) : sendCommand("/gamemode " + std::string{arg});
+    if (!ok) {
         return false;
     }
 
-    log.info("Requested gamemode {} -> {}", name(current), name(target));
+    gPending = PendingMode{target, now + kPendingTimeout};
+    notify("Game mode: " + std::string{name(target)});
+    log.info("Requested gamemode {} -> {}", name(base), name(target));
     return true;
 }
 

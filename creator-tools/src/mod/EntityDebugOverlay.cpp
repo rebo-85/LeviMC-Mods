@@ -34,11 +34,13 @@
 #include "mc/world/actor/bhave/node/SelectorBehaviorNode.h"
 #include "mc/world/actor/bhave/node/SequenceBehaviorNode.h"
 #include "mc/world/actor/bhave/node/SubtreeNode.h"
+#include "mc/world/actor/player/Player.h"
 #include "mc/world/level/Level.h"
 #include "mc/world/phys/AABB.h"
 #include "mc/world/phys/HitResult.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <fmt/format.h>
 #include <utility>
@@ -52,40 +54,52 @@ namespace {
 
 constexpr auto          kBehaviorRefreshInterval = std::chrono::milliseconds{250};
 constexpr auto          kShapeRefreshInterval    = std::chrono::milliseconds{100};
+constexpr auto          kShapeResendInterval     = std::chrono::seconds{2}; // re-send even if unchanged, to self-heal
 constexpr std::size_t   kMaxDisplayedBehaviors   = 8;
+constexpr std::size_t   kMaxCollectedBehaviors   = 64;
 constexpr std::size_t   kMaxDebugTextLines       = 16;
 constexpr std::uint64_t kShapeIdBase             = 0x43544F4F4C530000ULL;
 constexpr std::uint64_t kBoxShapeId              = kShapeIdBase + kMaxDebugTextLines;
 
-using DebugTextLine = std::pair<std::string, bool>;
-
-void collectBehaviorNames(BehaviorDefinition const* definition, std::vector<std::string>& names) {
-    if (!definition || names.size() >= 64) {
+/// Flattens the definition tree into display entries. Containers (composites/decorators) are listed
+/// only if they have a name, and only those increase the indentation depth.
+/// `activeDefinition` is the definition of the node that is currently running, matched by identity.
+void collectBehaviorEntries(
+    BehaviorDefinition const*   definition,
+    BehaviorDefinition const*   activeDefinition,
+    int                         depth,
+    std::vector<BehaviorEntry>& entries
+) {
+    if (!definition || entries.size() >= kMaxCollectedBehaviors) {
         return;
     }
 
+    auto add = [&](std::string const& name) {
+        if (name.empty()) {
+            return false;
+        }
+        entries.push_back(BehaviorEntry{name, depth, activeDefinition && definition == activeDefinition});
+        return true;
+    };
+
     if (auto const* composite = dynamic_cast<CompositeDefinition const*>(definition)) {
+        int const childDepth = add(definition->mName.get()) ? depth + 1 : depth;
         for (auto const& child : composite->mChildren.get()) {
-            collectBehaviorNames(child.get(), names);
+            collectBehaviorEntries(child.get(), activeDefinition, childDepth, entries);
         }
         return;
     }
     if (auto const* decorator = dynamic_cast<DecoratorDefinition const*>(definition)) {
-        collectBehaviorNames(decorator->mChild.get(), names);
+        int const childDepth = add(definition->mName.get()) ? depth + 1 : depth;
+        collectBehaviorEntries(decorator->mChild.get(), activeDefinition, childDepth, entries);
         return;
     }
     if (auto const* subtree = dynamic_cast<SubtreeDefinition const*>(definition)) {
-        auto const& name = subtree->mSubtreeId.get();
-        if (!name.empty()) {
-            names.push_back(name);
-        }
+        add(subtree->mSubtreeId.get());
         return;
     }
 
-    auto const& name = definition->mName.get();
-    if (!name.empty()) {
-        names.push_back(name);
-    }
+    add(definition->mName.get());
 }
 
 BehaviorNode const* getActiveChild(BehaviorNode const& node) {
@@ -120,6 +134,19 @@ BehaviorNode const* getRunningLeaf(BehaviorNode const* node) {
         }
     }
     return node->mStatus == BehaviorStatus::Running ? node : nullptr;
+}
+
+std::string formatEntry(BehaviorEntry const& entry) {
+    // ">" markers instead of spaces: the text is centered in the world, so leading spaces would vanish.
+    if (entry.depth <= 0) {
+        return entry.name;
+    }
+    return std::string(static_cast<std::size_t>(entry.depth), '>') + " " + entry.name;
+}
+
+std::int64_t localPlayerUniqueId(Level& level) {
+    auto* player = level.getPrimaryLocalPlayer();
+    return player ? player->getOrCreateUniqueID().rawID : 0;
 }
 
 PrimitiveShapeDataPayload makeTextShape(
@@ -173,11 +200,41 @@ PrimitiveShapeDataPayload makeRemovedShape(std::uint64_t id) {
     return shape;
 }
 
-void sendShapes(std::vector<PrimitiveShapeDataPayload> shapes) {
+/// Sends the shapes to the local player only. The integrated server may have LAN guests, and
+/// broadcasting with sendToClients() would show them our debug labels too.
+/// Server thread only. Returns false if the local player's server-side entity can't be found.
+///
+/// NOTE: relies on Packet::sendTo(Player const&); if your LeviLamina version names it differently,
+/// this is the one place to adjust.
+bool sendShapes(std::vector<PrimitiveShapeDataPayload> shapes, std::int64_t localPlayerId) {
+    if (localPlayerId == 0) {
+        return false;
+    }
+    auto level = ll::service::getLevel();
+    if (!level) {
+        return false;
+    }
+
+    // Look the player up in the server's player list instead of dynamic_cast-ing an Actor: Minecraft's
+    // own classes have no usable RTTI, so dynamic_cast on them throws std::__non_rtti_object.
+    // (Only the behavior-definition/node classes in this file are safe to dynamic_cast.)
+    Player* player = nullptr;
+    level->forEachPlayer([&](Player& candidate) {
+        if (candidate.getOrCreateUniqueID().rawID == localPlayerId) {
+            player = &candidate;
+            return false; // stop iterating
+        }
+        return true;
+    });
+    if (!player) {
+        return false;
+    }
+
     PrimitiveShapesPacket packet{};
     packet.setSerializationMode(SerializationMode::CerealOnly);
     packet.mShapes.get() = std::move(shapes);
-    packet.sendToClients();
+    packet.sendTo(*player);
+    return true;
 }
 
 std::vector<PrimitiveShapeDataPayload> makeRemovalShapes() {
@@ -193,6 +250,8 @@ std::vector<PrimitiveShapeDataPayload> makeRemovalShapes() {
 } // namespace
 
 bool EntityDebugOverlay::enable() {
+    mAlive->store(true);
+
     mMouseListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::MouseInputEvent>(
         [this](ll::event::MouseInputEvent& event) {
             if (event.actionButtonId() != MouseAction::ActionRight || event.buttonData() != MouseAction::DataDown) {
@@ -242,6 +301,12 @@ bool EntityDebugOverlay::enable() {
 
     mRenderListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::BeforeUIRenderEvent>(
         [this](ll::event::BeforeUIRenderEvent&) {
+            // Runs every frame: bail out first when nothing is selected.
+            auto const runtimeId = mSelectedRuntimeId.load();
+            if (runtimeId == 0) {
+                return;
+            }
+
             auto client = ll::service::getClientInstance();
             if (!client || !client->isWorldActive()) {
                 clearSelection();
@@ -251,10 +316,6 @@ bool EntityDebugOverlay::enable() {
                 return;
             }
 
-            auto const runtimeId = mSelectedRuntimeId.load();
-            if (runtimeId == 0) {
-                return;
-            }
             auto const generation = mSelectionGeneration.load();
             auto&      logger     = CreatorTools::getInstance().getSelf().getLogger();
             if (mLastRenderLogGeneration != generation) {
@@ -275,6 +336,7 @@ bool EntityDebugOverlay::enable() {
                 return;
             }
 
+            mLocalPlayerUniqueId.store(localPlayerUniqueId(*level));
             requestBehaviorSnapshot(runtimeId, target->getOrCreateUniqueID().rawID);
             queueShapeUpdate(runtimeId, generation);
         }
@@ -286,7 +348,8 @@ bool EntityDebugOverlay::enable() {
 void EntityDebugOverlay::disable() {
     mMouseListener.reset();
     mRenderListener.reset();
-    clearSelection();
+    clearSelection(); // queues removal of the on-screen shapes
+    mAlive->store(false);
 }
 
 void EntityDebugOverlay::clearSelection() {
@@ -341,7 +404,11 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::i
         return;
     }
 
-    ll::thread::ServerThreadExecutor::getDefault().execute([this, runtimeId, uniqueId, generation] {
+    ll::thread::ServerThreadExecutor::getDefault().execute([this, alive = mAlive, runtimeId, uniqueId, generation] {
+        if (!alive->load()) {
+            return;
+        }
+
         BehaviorSnapshot snapshot;
         snapshot.runtimeId = runtimeId;
         snapshot.ready     = true;
@@ -362,15 +429,29 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::i
                     snapshot.available             = true;
                     snapshot.runtimeStateAvailable = true;
 
-                    auto const* tree = component->mTreeDefinition->mPtr;
-                    if (tree) {
-                        snapshot.treeName = tree->mTreeName.get();
-                        collectBehaviorNames(tree->mRoot.get(), snapshot.names);
-                    }
-
+                    // Find the running leaf first so the matching entry can be flagged by identity.
+                    BehaviorDefinition const* activeDefinition = nullptr;
                     if (auto const* active = getRunningLeaf(component->mRoot.get());
                         active && active->mNodeDefinition) {
                         snapshot.activeName = active->mNodeDefinition->mName.get();
+                        activeDefinition    = &*active->mNodeDefinition;
+                    }
+
+                    auto const* tree = component->mTreeDefinition->mPtr;
+                    if (tree) {
+                        snapshot.treeName = tree->mTreeName.get();
+                        collectBehaviorEntries(tree->mRoot.get(), activeDefinition, 0, snapshot.entries);
+                    }
+
+                    // Safety net: if identity matching found nothing, fall back to matching by name.
+                    bool const anyActive =
+                        std::any_of(snapshot.entries.begin(), snapshot.entries.end(), [](auto const& e) {
+                            return e.active;
+                        });
+                    if (!anyActive && !snapshot.activeName.empty()) {
+                        for (auto& entry : snapshot.entries) {
+                            entry.active = entry.name == snapshot.activeName;
+                        }
                     }
                 } else if (!snapshot.treeName.empty()) {
                     snapshot.available = true;
@@ -404,13 +485,14 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         return;
     }
 
-    ll::thread::ServerThreadExecutor::getDefault().execute([this, runtimeId, generation] {
-        if (mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != runtimeId) {
+    ll::thread::ServerThreadExecutor::getDefault().execute([this, alive = mAlive, runtimeId, generation] {
+        if (!alive->load() || mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != runtimeId) {
             return;
         }
 
-        auto  level  = ll::service::getLevel();
-        auto* target = level ? level->getRuntimeEntity(ActorRuntimeID{runtimeId}, false) : nullptr;
+        auto const localPlayerId = mLocalPlayerUniqueId.load();
+        auto       level         = ll::service::getLevel();
+        auto*      target        = level ? level->getRuntimeEntity(ActorRuntimeID{runtimeId}, false) : nullptr;
         if (!target) {
             if (mLastShapeWarningGeneration.exchange(generation) != generation) {
                 CreatorTools::getInstance().getSelf().getLogger().warn(
@@ -418,16 +500,21 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
                     runtimeId
                 );
             }
-            sendShapes(makeRemovalShapes());
+            sendShapes(makeRemovalShapes(), localPlayerId);
             mActiveTextShapeCount = 0;
+            mLastSent             = {};
             return;
         }
 
-        std::vector<DebugTextLine> lines;
-        lines.emplace_back(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()), false);
+        std::vector<DebugLine> lines;
+        auto                   addLine = [&lines](std::string text, bool highlighted = false) {
+            lines.push_back(DebugLine{std::move(text), highlighted});
+        };
+
+        addLine(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()));
 
         auto const position = target->getPosition();
-        lines.emplace_back(fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z), false);
+        addLine(fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z));
 
         BehaviorSnapshot snapshot;
         {
@@ -438,32 +525,43 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         }
 
         if (!snapshot.ready) {
-            lines.emplace_back("Behaviors: checking...", false);
+            addLine("Behaviors: checking...");
         } else if (!snapshot.available) {
-            lines.emplace_back("No behavior tree", false);
+            addLine("No behavior tree");
         } else {
-            lines.emplace_back("Behaviors:", false);
+            addLine("Behaviors:");
             if (!snapshot.treeName.empty()) {
-                lines.emplace_back("Behavior tree: " + snapshot.treeName, false);
+                addLine("Behavior tree: " + snapshot.treeName);
             }
-            auto const visibleCount = std::min(snapshot.names.size(), kMaxDisplayedBehaviors);
+
+            constexpr auto npos        = std::numeric_limits<std::size_t>::max();
+            std::size_t    activeIndex = npos;
+            for (std::size_t i = 0; i < snapshot.entries.size(); ++i) {
+                if (snapshot.entries[i].active) {
+                    activeIndex = i;
+                    break;
+                }
+            }
+
+            auto const visibleCount = std::min(snapshot.entries.size(), kMaxDisplayedBehaviors);
             for (std::size_t i = 0; i < visibleCount; ++i) {
-                auto const& name = snapshot.names[i];
-                lines.emplace_back(name, !snapshot.activeName.empty() && name == snapshot.activeName);
+                addLine(formatEntry(snapshot.entries[i]), snapshot.entries[i].active);
             }
-            if (snapshot.names.size() > visibleCount) {
-                lines.emplace_back(fmt::format("... and {} more", snapshot.names.size() - visibleCount), false);
+            if (snapshot.entries.size() > visibleCount) {
+                addLine(fmt::format("... and {} more", snapshot.entries.size() - visibleCount));
+                // Don't hide the running behavior just because it is past the display limit.
+                if (activeIndex != npos && activeIndex >= visibleCount) {
+                    addLine(formatEntry(snapshot.entries[activeIndex]), true);
+                }
             }
-            if (snapshot.names.empty() && snapshot.activeName.empty() && snapshot.runtimeStateAvailable) {
-                lines.emplace_back("No behavior entries", false);
+
+            if (snapshot.entries.empty() && snapshot.activeName.empty() && snapshot.runtimeStateAvailable) {
+                addLine("No behavior entries");
             } else if (!snapshot.runtimeStateAvailable) {
-                lines.emplace_back("Runtime behavior state unavailable", false);
+                addLine("Runtime behavior state unavailable");
             }
-            if (!snapshot.activeName.empty()
-                && std::none_of(snapshot.names.begin(), snapshot.names.end(), [&snapshot](std::string const& name) {
-                       return name == snapshot.activeName;
-                   })) {
-                lines.emplace_back(snapshot.activeName, true);
+            if (!snapshot.activeName.empty() && activeIndex == npos) {
+                addLine(snapshot.activeName, true);
             }
         }
 
@@ -479,16 +577,28 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
         auto const  centerY        = (bounds.min.y + bounds.max.y) * 0.5f;
         auto const  centerZ        = (bounds.min.z + bounds.max.z) * 0.5f;
 
+        // The shapes are attached to the entity, so they follow it on their own. Only send when the text
+        // or box changed (or every few seconds, to recover if the client lost them).
+        std::array<float, 6> const
+                   boundsKey{bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z};
+        auto const sendTime = std::chrono::steady_clock::now();
+        if (mLastSent.generation == generation && mLastSent.lines == lines && mLastSent.bounds == boundsKey
+            && sendTime - mLastSent.sentAt < kShapeResendInterval) {
+            return;
+        }
+
+        std::vector<DebugLine> sentLines = lines; // copy for the cache; `lines` is moved from below
+
         std::vector<PrimitiveShapeDataPayload> shapes;
         shapes.reserve(lines.size() + mActiveTextShapeCount + 1);
         for (std::size_t i = 0; i < lines.size(); ++i) {
             auto const height = bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * 0.24f;
             auto const color =
-                lines[i].second ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
+                lines[i].highlighted ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
             shapes.push_back(makeTextShape(
                 kShapeIdBase + i,
                 Vec3{centerX - entityPosition.x, height - entityPosition.y, centerZ - entityPosition.z},
-                std::move(lines[i].first),
+                std::move(lines[i].text),
                 color,
                 dimension,
                 attachedTo
@@ -504,8 +614,12 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
             dimension,
             attachedTo
         ));
-        sendShapes(std::move(shapes));
-        mActiveTextShapeCount = lines.size();
+
+        if (!sendShapes(std::move(shapes), localPlayerId)) {
+            return; // local player not available yet; try again on the next refresh
+        }
+        mActiveTextShapeCount = sentLines.size();
+        mLastSent             = SentState{generation, std::move(sentLines), boundsKey, sendTime};
     });
 }
 
@@ -514,12 +628,14 @@ void EntityDebugOverlay::queueShapeRemoval(std::uint64_t generation) {
         return;
     }
 
+    // Deliberately not gated on mAlive: disable() relies on this to remove the shapes from the screen.
     ll::thread::ServerThreadExecutor::getDefault().execute([this, generation] {
         if (mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != 0) {
             return;
         }
-        sendShapes(makeRemovalShapes());
+        sendShapes(makeRemovalShapes(), mLocalPlayerUniqueId.load());
         mActiveTextShapeCount = 0;
+        mLastSent             = {};
     });
 }
 

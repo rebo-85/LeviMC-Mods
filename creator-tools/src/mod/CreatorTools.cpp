@@ -3,10 +3,10 @@
 #include "mod/ClientCommands.h"
 #include "mod/Gamemode.h"
 #include "mod/GameplayState.h"
+#include "mod/ServerActions.h"
 
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/input/KeyInputEvent.h"
-#include "ll/api/event/render/UIRenderEvent.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/service/Bedrock.h"
 #include "ll/api/thread/ClientThreadExecutor.h"
@@ -17,16 +17,14 @@
 #include "mc/client/gui/FontRepository.h"
 #include "mc/client/gui/interface/IUIRepository.h"
 #include "mc/client/renderer/TextureGroup.h"
-#include "mc/client/world/LocalWorldStarter.h"
-#include "mc/client/world/WorldID.h"
-#include "mc/client/world/WorldSystem.h"
 #include "mc/resources/IResourcePackRepository.h"
-#include "mc/server/ServerInstance.h"
 #include "mc/world/level/Level.h"
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <fmt/format.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -40,59 +38,104 @@ namespace {
 constexpr int kKeyG = 'G';
 constexpr int kKeyR = 'R';
 
-constexpr auto kGamemodeDebounce = std::chrono::milliseconds{250};
-constexpr auto kReentryTimeout   = std::chrono::seconds{30};
+constexpr unsigned kModNone  = 0;
+constexpr unsigned kModCtrl  = 1;
+constexpr unsigned kModShift = 2;
+constexpr unsigned kModAlt   = 4;
 
-std::atomic_bool gClientReloadInProgress{false};
+constexpr auto         kGamemodeDebounce      = std::chrono::milliseconds{250};
+constexpr std::int64_t kClientReloadTimeoutMs = 30'000;
+
+// Client asset reload bookkeeping. The generation counter lets a reload that is stuck (its async
+// result never completes) be superseded after kClientReloadTimeoutMs without the stale completion
+// callback later clearing the flag of the new reload.
+std::atomic_bool           gClientReloadInProgress{false};
+std::atomic<std::int64_t>  gClientReloadStartedAtMs{0};
+std::atomic<std::uint64_t> gClientReloadGeneration{0};
 
 bool isKeyDown(int virtualKey) { return (GetAsyncKeyState(virtualKey) & 0x8000) != 0; }
 
-void sendReloadCommand() {
-    if (sendCommand("/reload")) {
-        notify("Requested behavior-resource reload (/reload)");
+unsigned currentModifiers() {
+    unsigned mods = kModNone;
+    if (isKeyDown(VK_CONTROL)) mods |= kModCtrl;
+    if (isKeyDown(VK_SHIFT)) mods |= kModShift;
+    if (isKeyDown(VK_MENU)) mods |= kModAlt;
+    return mods;
+}
+
+std::int64_t nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/// Returns the new reload's generation, or 0 if a reload is already running.
+std::uint64_t tryBeginClientReload() {
+    auto const now = nowMs();
+    if (gClientReloadInProgress.exchange(true, std::memory_order_acq_rel)) {
+        if (now - gClientReloadStartedAtMs.load(std::memory_order_acquire) < kClientReloadTimeoutMs) {
+            return 0;
+        }
+        CreatorTools::getInstance().getSelf().getLogger().warn(
+            "Previous client asset reload never finished; starting a new one"
+        );
+    }
+    gClientReloadStartedAtMs.store(now, std::memory_order_release);
+    return gClientReloadGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+void finishClientReload(std::uint64_t generation) {
+    if (gClientReloadGeneration.load(std::memory_order_acquire) == generation) {
+        gClientReloadInProgress.store(false, std::memory_order_release);
     }
 }
 
 void reloadClientAssets() {
-    auto& creatorTools = CreatorTools::getInstance();
-    auto  client       = ll::service::getClientInstance();
+    auto& logger = CreatorTools::getInstance().getSelf().getLogger();
+    auto  client = ll::service::getClientInstance();
     if (!client) {
-        creatorTools.getSelf().getLogger().warn("Cannot reload client assets: no active client");
+        logger.warn("Cannot reload client assets: no active client");
         return;
     }
 
-    if (gClientReloadInProgress.exchange(true, std::memory_order_acq_rel)) {
-        creatorTools.getSelf().getLogger().info("Client asset reload already in progress");
+    auto const generation = tryBeginClientReload();
+    if (generation == 0) {
+        notify("A client asset reload is already in progress");
         return;
     }
 
     auto refresh = client->getResourcePackRepository().refreshPacksAsync();
     if (!refresh.mResult) {
-        gClientReloadInProgress.store(false, std::memory_order_release);
-        creatorTools.getSelf().getLogger().warn("Cannot reload client assets: pack refresh did not start");
+        finishClientReload(generation);
+        notify("Cannot reload client assets: pack refresh did not start");
         return;
     }
 
+    notify("Reloading client packs and assets...");
     auto const startedAt = std::chrono::steady_clock::now();
-    refresh.mResult->addOnComplete([startedAt](Bedrock::Threading::IAsyncResult<void> const& result) {
+    refresh.mResult->addOnComplete([startedAt, generation](Bedrock::Threading::IAsyncResult<void> const& result) {
         auto const error = result.getError();
         if (error) {
-            gClientReloadInProgress.store(false, std::memory_order_release);
-            CreatorTools::getInstance().getSelf().getLogger().warn(
-                "Cannot refresh client resource packs: {}",
-                error.message()
-            );
+            finishClientReload(generation);
+            auto message = fmt::format("Cannot refresh client resource packs: {}", error.message());
+            ll::thread::ClientThreadExecutor::getDefault().execute([message = std::move(message)] { notify(message); });
             return;
         }
 
-        ll::thread::ClientThreadExecutor::getDefault().execute([startedAt] {
+        ll::thread::ClientThreadExecutor::getDefault().execute([startedAt, generation] {
             // Clears the in-progress flag on every exit path below.
             struct Guard {
-                ~Guard() { gClientReloadInProgress.store(false, std::memory_order_release); }
-            } guard;
+                explicit Guard(std::uint64_t g) : generation(g) {}
+                ~Guard() { finishClientReload(generation); }
+                std::uint64_t generation;
+            } guard{generation};
 
             auto& logger = CreatorTools::getInstance().getSelf().getLogger();
-            auto  client = ll::service::getClientInstance();
+            if (gClientReloadGeneration.load(std::memory_order_acquire) != generation) {
+                logger.warn("Ignoring a client asset reload that was superseded by a newer one");
+                return;
+            }
+
+            auto client = ll::service::getClientInstance();
             if (!client) {
                 logger.warn("Cannot reload client assets: no active client after pack refresh");
                 return;
@@ -107,7 +150,7 @@ void reloadClientAssets() {
 
             auto textureGroup = client->getTextureGroup();
             if (!textureGroup) {
-                logger.warn("Cannot reload client textures: no texture group");
+                notify("Cannot reload client textures: no texture group");
                 return;
             }
             textureGroup->reloadAllTextures();
@@ -124,7 +167,7 @@ void reloadClientAssets() {
             );
         });
     });
-    creatorTools.getSelf().getLogger().info("Refreshing client resource packs");
+    logger.info("Refreshing client resource packs");
 }
 } // namespace
 
@@ -133,227 +176,133 @@ CreatorTools& CreatorTools::getInstance() {
     return instance;
 }
 
-void CreatorTools::reloadBehaviorResourcesAndReenterWorld() {
-    auto client = ll::service::getClientInstance();
-    auto level  = ll::service::getMultiPlayerLevel();
-    auto server = ll::service::getServerInstance();
-    if (!client || !level) {
-        getSelf().getLogger().warn("Cannot reload and re-enter world: no active client level");
+void CreatorTools::requestGamemodeCycle() {
+    auto const now = std::chrono::steady_clock::now();
+    if (now - mLastGamemodeSwitch < kGamemodeDebounce) {
+        return;
+    }
+    mLastGamemodeSwitch = now;
+    gamemode::cycleLocalPlayer();
+}
+
+void CreatorTools::handleKeyInput(ll::event::KeyInputEvent& event) {
+    auto const key = static_cast<int>(event.keyCode());
+
+    // Is a binding on this key currently held? Then every repeat/release event belongs to it, even if
+    // the modifier keys changed in the meantime (so pressing Ctrl mid-hold can't trigger a second action).
+    bool anyHeld     = false;
+    bool consumeHeld = false;
+    for (auto const& binding : mBindings) {
+        if (binding.key == key && binding.held) {
+            anyHeld     = true;
+            consumeHeld = consumeHeld || binding.consume;
+        }
+    }
+    auto releaseKey = [&] {
+        for (auto& binding : mBindings) {
+            if (binding.key == key) {
+                binding.held = false;
+            }
+        }
+    };
+
+    if (!isMinecraftForeground()) {
+        releaseKey();
         return;
     }
 
-    if (!server) {
-        getSelf().getLogger().warn(
-            "Cannot re-enter a remote world automatically; requesting behavior-resource reload only"
-        );
-        sendReloadCommand();
+    if (!event.isDown()) {
+        if (anyHeld) {
+            if (consumeHeld) {
+                event.cancel();
+            }
+            releaseKey();
+        }
         return;
     }
 
-    if (mPendingReentry) {
-        getSelf().getLogger().warn("Cannot reload and re-enter world: a world reload is already in progress");
+    if (anyHeld) {
+        if (consumeHeld) {
+            event.cancel();
+        }
         return;
     }
 
-    auto const worldId = level->getLevelId();
-    if (worldId.empty()) {
-        getSelf().getLogger().warn("Cannot reload and re-enter world: the current world has no level ID");
-        return;
-    }
-    beginReentry(worldId);
-    notify("Reloading behavior resources and re-entering the world...");
-    getSelf().getLogger().info("World re-entry queued for level ID '{}'", worldId);
+    auto const mods = currentModifiers();
+    for (auto& binding : mBindings) {
+        if (binding.key != key || binding.mods != mods) {
+            continue;
+        }
 
-    ll::thread::ServerThreadExecutor::getDefault().execute([this, worldId] {
-        auto server = ll::service::getServerInstance();
-        if (!server) {
-            ll::thread::ClientThreadExecutor::getDefault().execute([this, worldId] {
-                if (mPendingReentry && mPendingReentry->worldId == worldId) {
-                    clearReentry();
+        if (!isGameplayActive()) {
+            // Log the rejected screen once per distinct name so a wrong kGameplayScreenName is easy to spot.
+            if (auto client = ll::service::getClientInstance()) {
+                auto screen = std::string{client->getTopScreenName()};
+                if (screen != mLastRejectedScreen) {
+                    getSelf().getLogger().debug("Ignored hotkey: top screen is '{}', not gameplay", screen);
+                    mLastRejectedScreen = std::move(screen);
                 }
-                getSelf().getLogger().warn("Cannot reload and re-enter world: the local server stopped");
-            });
+            }
             return;
         }
 
-        server->onRequestResourceReload();
-        getSelf().getLogger().info("Requested behavior-resource reload before re-entering the world");
-        ll::thread::ClientThreadExecutor::getDefault().execute([this, worldId] {
-            auto client = ll::service::getClientInstance();
-            if (!client) {
-                clearReentry();
-                getSelf().getLogger().warn("Cannot re-enter world: no active client");
-                return;
-            }
-            getSelf().getLogger().info("Requesting synchronous world exit");
-            client->requestLeaveGame(true, true);
-        });
-    });
+        binding.held = true;
+        if (binding.consume) {
+            event.cancel();
+        }
+        ll::thread::ClientThreadExecutor::getDefault().execute([action = binding.action] { action(); });
+        return;
+    }
 }
 
-void CreatorTools::startWorldAfterShutdown() {
-    if (!mPendingReentry) {
+void CreatorTools::reloadBehaviorResources() {
+    if (!ll::service::getClientInstance() || !ll::service::getMultiPlayerLevel()) {
+        getSelf().getLogger().warn("Cannot reload behavior resources: no active client level");
         return;
     }
 
-    if (std::chrono::steady_clock::now() > mPendingReentry->deadline) {
-        auto const worldId = mPendingReentry->worldId;
-        clearReentry();
-        getSelf().getLogger().warn(
-            "Gave up re-entering level ID '{}': the world did not shut down within {}s",
-            worldId,
-            std::chrono::duration_cast<std::chrono::seconds>(kReentryTimeout).count()
-        );
-        return;
+    // Local world: in-process server call. Remote world: no API reaches the server, so ask it with /reload.
+    if (server::reloadLocal(false)) {
+        notify("Reloading behavior resources...");
+    } else if (sendCommand("/reload")) {
+        notify("Requested behavior-resource reload (/reload)");
     }
-
-    auto client = ll::service::getClientInstance();
-    if (!client || !client->getMinecraftGame().isLeaveGameDone()) {
-        return;
-    }
-
-    auto       server = ll::service::getServerInstance();
-    bool const serverStopped =
-        !server
-        || server->mInstanceState.get().load(std::memory_order_acquire) == ServerInstance::InstanceState::Stopped;
-    if (!serverStopped) {
-        return;
-    }
-
-    auto const worldId = mPendingReentry->worldId;
-    getSelf().getLogger().info("World shutdown complete; starting level ID '{}'", worldId);
-    auto& localWorldStarter = client->getWorldSystem().mModules.get().mLocalWorldStarter;
-    if (!localWorldStarter) {
-        clearReentry();
-        getSelf().getLogger().warn("Cannot re-enter world: local world starter is unavailable");
-        return;
-    }
-
-    World::WorldID id;
-    id.mValue         = worldId;
-    auto const result = localWorldStarter->startLocalWorld(id);
-    clearReentry();
-    if (result != World::StartLocalWorldResult::Ok) {
-        getSelf().getLogger().warn(
-            "Cannot re-enter world: starting the local world failed with result {}",
-            static_cast<int>(result)
-        );
-        return;
-    }
-    getSelf().getLogger().info("Started the world again after behavior-resource reload");
 }
 
-void CreatorTools::beginReentry(std::string worldId) {
-    mPendingReentry = PendingReentry{std::move(worldId), std::chrono::steady_clock::now() + kReentryTimeout};
-    mReentryPending.store(true, std::memory_order_release);
-}
+void CreatorTools::reloadAll() {
+    if (!ll::service::getClientInstance() || !ll::service::getMultiPlayerLevel()) {
+        getSelf().getLogger().warn("Cannot reload all: no active client level");
+        return;
+    }
 
-void CreatorTools::clearReentry() {
-    mPendingReentry.reset();
-    mReentryPending.store(false, std::memory_order_release);
+    // No leaving/re-entering the world anymore: /reload all runs inside the live server.
+    if (server::reloadLocal(true)) {
+        notify("Reloading behavior packs (/reload all)...");
+    } else if (sendCommand("/reload all")) {
+        notify("Requested full reload (/reload all)");
+    }
 }
 
 bool CreatorTools::load() {
-    getSelf().getLogger().info("Loading");
     getSelf().getLogger().info("Loaded");
     return true;
 }
 
 bool CreatorTools::enable() {
+    mAlive->store(true);
     mEntityDebugOverlay.enable();
-    mWorldReentryListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::BeforeUIRenderEvent>(
-        [this](ll::event::BeforeUIRenderEvent&) {
-            if (!mReentryPending.load(std::memory_order_acquire)) {
-                return;
-            }
-            if (mWorldReentryCheckQueued.exchange(true, std::memory_order_acq_rel)) {
-                return;
-            }
 
-            ll::thread::ClientThreadExecutor::getDefault().execute([this] {
-                mWorldReentryCheckQueued.store(false, std::memory_order_release);
-                startWorldAfterShutdown();
-            });
-        }
-    );
+    // G is intentionally not consumed (plain key, only active on the HUD). The R bindings are consumed
+    // so the game never sees Ctrl/Shift+R.
+    mBindings = {
+        Binding{kKeyG, kModNone,             false, [this] { requestGamemodeCycle(); }   },
+        Binding{kKeyR, kModCtrl,             true,  [this] { reloadBehaviorResources(); }},
+        Binding{kKeyR, kModCtrl | kModShift, true,  [this] { reloadAll(); }              },
+        Binding{kKeyR, kModShift,            true,  [] { reloadClientAssets(); }         },
+    };
+
     mListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::KeyInputEvent>(
-        [this](ll::event::KeyInputEvent& event) {
-            if (event.keyCode() == kKeyR) {
-                if (!isMinecraftForeground()) {
-                    mRPressed = false;
-                    return;
-                }
-
-                if (!event.isDown()) {
-                    if (mRPressed) {
-                        event.cancel();
-                    }
-                    mRPressed = false;
-                    return;
-                }
-
-                if (!isGameplayActive()) {
-                    return;
-                }
-
-                bool const controlPressed = isKeyDown(VK_CONTROL);
-                bool const shiftPressed   = isKeyDown(VK_SHIFT);
-                if (!controlPressed && !shiftPressed) {
-                    return;
-                }
-
-                if (mRPressed) {
-                    event.cancel();
-                    return;
-                }
-
-                mRPressed = true;
-                event.cancel();
-                if (controlPressed && shiftPressed) {
-                    ll::thread::ClientThreadExecutor::getDefault().execute([this] {
-                        reloadBehaviorResourcesAndReenterWorld();
-                    });
-                } else if (controlPressed) {
-                    ll::thread::ClientThreadExecutor::getDefault().execute(sendReloadCommand);
-                } else {
-                    ll::thread::ClientThreadExecutor::getDefault().execute(reloadClientAssets);
-                }
-                return;
-            }
-
-            if (event.keyCode() != kKeyG) {
-                return;
-            }
-
-            if (!isMinecraftForeground()) {
-                mGPressed = false;
-                return;
-            }
-
-            if (!isGameplayActive()) {
-                mGPressed = false;
-                return;
-            }
-
-            if (event.isDown()) {
-                // Plain G only: Ctrl+G, Shift+G and Alt+G must not switch game mode.
-                if (isKeyDown(VK_CONTROL) || isKeyDown(VK_SHIFT) || isKeyDown(VK_MENU)) {
-                    return;
-                }
-                if (mGPressed) {
-                    return;
-                }
-                mGPressed      = true;
-                auto const now = std::chrono::steady_clock::now();
-                if (now - mLastGamemodeSwitch < kGamemodeDebounce) {
-                    return;
-                }
-                mLastGamemodeSwitch = now;
-                ll::thread::ClientThreadExecutor::getDefault().execute([] { gamemode::cycleLocalPlayer(); });
-            } else {
-                mGPressed = false;
-            }
-        }
+        [this](ll::event::KeyInputEvent& event) { handleKeyInput(event); }
     );
 
     getSelf().getLogger().info("Enabled");
@@ -361,13 +310,10 @@ bool CreatorTools::enable() {
 }
 
 bool CreatorTools::disable() {
+    mAlive->store(false);
     mListener.reset();
-    mWorldReentryListener.reset();
     mEntityDebugOverlay.disable();
-    mGPressed = false;
-    mRPressed = false;
-    clearReentry();
-    mWorldReentryCheckQueued.store(false, std::memory_order_release);
+    mBindings.clear();
     getSelf().getLogger().info("Disabled");
     return true;
 }

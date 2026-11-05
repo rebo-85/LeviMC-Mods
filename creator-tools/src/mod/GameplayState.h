@@ -10,6 +10,14 @@
 
 namespace creator_tools {
 
+/// The only screen on which hotkeys are active: the in-game HUD.
+///
+/// This is a whitelist on purpose. A blocklist of menu names misses text-entry screens such as the
+/// anvil rename box, sign editor, book editor and command block screen, so typing a "g" there
+/// would switch game mode. If hotkeys never fire, enable debug logging: the mod logs the name of
+/// the top screen whenever it rejects a matching key press, so you can correct this value.
+inline constexpr std::string_view kGameplayScreenName = "hud_screen";
+
 inline bool isMinecraftForeground() {
     HWND foreground = GetForegroundWindow();
     if (foreground == nullptr) {
@@ -31,17 +39,7 @@ inline bool isMinecraftForeground() {
 
 inline bool isGameplayActive() {
     auto client = ll::service::getClientInstance();
-    if (!client || !client->isWorldActive()) {
-        return false;
-    }
-
-    auto const screenName = client->getTopScreenName();
-    for (std::string_view menuName : {"pause", "chat", "inventory", "start", "death", "trade", "container"}) {
-        if (screenName.find(menuName) != std::string::npos) {
-            return false;
-        }
-    }
-    return true;
+    return client && client->isWorldActive() && client->getTopScreenName() == kGameplayScreenName;
 }
 
 } // namespace creator_tools
