@@ -296,6 +296,7 @@ bool CreatorTools::load() {
 bool CreatorTools::enable() {
     mAlive->store(true);
     mEntityDebugOverlay.enable();
+    mCommandHistory.enable();
 
     // G is intentionally not consumed (plain key, only active on the HUD). The R bindings are consumed
     // so the game never sees Ctrl/Shift+R.
@@ -318,6 +319,7 @@ bool CreatorTools::disable() {
     mAlive->store(false);
     mListener.reset();
     mEntityDebugOverlay.disable();
+    mCommandHistory.disable();
     mBindings.clear();
     getSelf().getLogger().info("Disabled");
     return true;

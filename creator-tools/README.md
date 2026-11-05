@@ -1,6 +1,6 @@
 # Creator Tools Mod
 
-Creator Tools is a small LeviLamina utility mod that speeds up creator-style workflows in Minecraft: switch game modes, reload packs, and inspect entities with a few keyboard shortcuts instead of digging through menus.
+Creator Tools is a small LeviLamina utility mod that speeds up creator-style workflows in Minecraft: switch game modes, reload packs, inspect entities, and keep your chat command history between sessions, all with a few keyboard shortcuts instead of digging through menus.
 
 <!-- TODO: add a screenshot or GIF of the entity debug label here -->
 
@@ -32,6 +32,17 @@ In a local world, pressing `G` calls the integrated server's player API directly
 
 Every reload action posts a chat message, so you don't need to watch the log.
 
+### Persistent command history
+
+Vanilla remembers the commands you have sent only until you close the game. Creator Tools saves them to disk, so after restarting Minecraft you can open chat, press `Up`, and step back through the commands from your previous sessions.
+
+- It uses the game's normal chat history, so there is no new key or screen: `Up` and `Down` work as usual.
+- Only slash commands are saved (not ordinary chat messages), the most recent 100 are kept, and a command you repeat is stored once.
+- The history is saved shortly after each change, so a crash or force-close doesn't lose your session.
+- It is stored as plain text in `command_history.txt` in the mod's data folder. Delete that file to clear the history.
+- The first line of the file (`# newest=front` or `# newest=back`) records how the game orders its history. The mod learns this by watching the first couple of commands you send, then reuses it. Don't remove that line.
+- It works in every world and on every server, since it is part of the client's chat history and not tied to a world.
+
 ### Entity debug label
 
 Aim at an entity and `Ctrl`+right-click to show world-space text above it with health, position and behavior-tree details, plus a wireframe of its collision box. Click the same entity again to hide it.
@@ -47,10 +58,13 @@ Aim at an entity and `Ctrl`+right-click to show world-space text above it with h
 - On remote servers `G`, `Ctrl+R` and `Ctrl+Shift+R` fall back to sending `/gamemode`, `/reload` and `/reload all`, so they need operator permission. Local worlds use direct server calls and need no cheats.
 - The entity debug label and behavior-tree details need a local world with an integrated server.
 - Only one `Shift+R` client reload can run at a time. Extra presses are ignored with a chat message.
+- The saved command history is shared across all worlds and servers, is stored unencrypted on disk, and holds slash commands only. Avoid typing secrets (such as passwords in commands) if that matters to you; `kOnlyCommands` in `CommandHistory.cpp` controls what is saved.
 
 ## Troubleshooting
 
 **Hotkeys do nothing in-game.** The mod decides "gameplay" by checking that the top screen is named `hud_screen` (see `kGameplayScreenName` in `GameplayState.h`). With debug logging enabled, the mod logs the top screen name whenever it ignores a matching key press, so you can see what your version calls it.
+
+**Command history doesn't come back after a restart.** Check that `command_history.txt` exists in the mod's data folder and contains your commands. On startup the log should say `Restored N command(s)`. If the history looks reversed after a restart, delete the file, send two or three commands, and restart again. The log line `Chat history order learned` confirms the order was detected.
 
 <!-- TODO: add Requirements (Minecraft / LeviLamina versions), Install and Build sections -->
 

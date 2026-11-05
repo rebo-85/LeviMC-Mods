@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mod/CommandHistory.h"
 #include "mod/EntityDebugOverlay.h"
 
 #include "ll/api/event/ListenerBase.h"
@@ -49,6 +50,7 @@ private:
 
     ll::mod::NativeMod&                   mSelf;
     EntityDebugOverlay                    mEntityDebugOverlay;
+    CommandHistory                        mCommandHistory;
     ll::event::ListenerPtr                mListener;
     std::vector<Binding>                  mBindings;
     std::string                           mLastRejectedScreen;
