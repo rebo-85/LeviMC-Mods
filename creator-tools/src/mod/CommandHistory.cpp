@@ -8,8 +8,10 @@
 #include "ll/api/thread/ClientThreadExecutor.h"
 
 #include "mc/client/game/ClientInstance.h"
+#include "mc/server/commands/CommandRegistry.h"
 
 #include <algorithm>
+#include <cctype>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -42,12 +44,46 @@ bool shouldPersist(std::string const& entry) {
     return !kOnlyCommands || entry.front() == '/';
 }
 
-std::deque<std::string> persistable(std::deque<std::string> const& history) {
+/// True if the client's command registry knows the command word of `entry` ("/gamemode creative" -> "gamemode").
+/// If the registry isn't available we can't tell, so the entry is accepted.
+bool isKnownCommand(std::string const& entry) {
+    auto registry = ll::service::getCommandRegistry(true);
+    if (!registry) {
+        return true;
+    }
+
+    std::string_view rest{entry};
+    rest.remove_prefix(1);
+    std::string name{rest.substr(0, rest.find_first_of(" \t"))};
+    for (auto& c : name) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (name.empty()) {
+        return false;
+    }
+    if (registry->findCommand(name)) {
+        return true;
+    }
+    if (auto const colon = name.find(':'); colon != std::string::npos) {
+        return registry->findCommand(name.substr(colon + 1)) != nullptr;
+    }
+    return false;
+}
+
+/// Entries already in `trusted` are kept as-is so an unavailable or incomplete registry cannot wipe saved history.
+std::deque<std::string> persistable(
+    std::deque<std::string> const& history,
+    std::deque<std::string> const& trusted
+) {
     std::deque<std::string> out;
     for (auto const& entry : history) {
-        if (shouldPersist(entry)) {
-            out.push_back(entry);
+        if (!shouldPersist(entry)) {
+            continue;
         }
+        if (std::ranges::find(trusted, entry) == trusted.end() && !isKnownCommand(entry)) {
+            continue;
+        }
+        out.push_back(entry);
     }
     return out;
 }
@@ -205,6 +241,7 @@ void CommandHistory::pollOnClientThread() {
 
     if (!mLoaded) {
         mLoaded = true;
+        std::deque<std::string> trusted;
         if (history.empty()) {
             auto const saved = readSaved();
             mNewestAtFront   = saved.newestAtFront;
@@ -213,12 +250,13 @@ void CommandHistory::pollOnClientThread() {
             for (auto const& command : saved.commands) {
                 insertEntry(history, command, mNewestAtFront.value_or(false));
             }
+            trusted = history;
             log.info("Restored {} command(s) from {}", saved.commands.size(), historyFile().string());
         } else {
             log.warn("Chat history already has entries; skipping restore to avoid scrambling the order");
         }
         mLastRaw   = history;
-        mLastSaved = persistable(history);
+        mLastSaved = persistable(history, trusted);
         return;
     }
 
@@ -236,7 +274,7 @@ void CommandHistory::pollOnClientThread() {
         mLastRaw = history;
     }
 
-    auto current = persistable(history);
+    auto current = persistable(history, mLastSaved);
     if (current == mLastSaved && !mPendingSave) {
         return;
     }
