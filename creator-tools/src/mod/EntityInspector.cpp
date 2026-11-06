@@ -1,19 +1,24 @@
-#include "mod/EntityDebugOverlay.h"
+#include "mod/EntityInspector.h"
 #include "mod/CreatorTools.h"
+#include "mod/DebugShapes.h"
 #include "mod/GameplayState.h"
 
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/input/MouseInputEvent.h"
 #include "ll/api/event/render/UIRenderEvent.h"
+#include "ll/api/memory/Hook.h"
 #include "ll/api/service/Bedrock.h"
 #include "ll/api/thread/ServerThreadExecutor.h"
 
 #include "mc/client/game/ClientInstance.h"
+#include "mc/client/renderer/actor/ActorRenderDispatcher.h"
 #include "mc/deps/core/math/Color.h"
+#include "mc/deps/minecraft_renderer/objects/NameTagRenderObject.h"
 #include "mc/deps/input/MouseAction.h"
 #include "mc/entity/components/BehaviorComponent.h"
 #include "mc/entity/components/GoalSelectorComponent.h"
 #include "mc/entity/components/PrioritizedGoal.h"
+#include "mc/entity/components_json_legacy/NavigationComponent.h"
 #include "mc/legacy/ActorRuntimeID.h"
 #include "mc/network/packet/BoxDataPayload.h"
 #include "mc/network/packet/PrimitiveShapeDataPayload.h"
@@ -39,7 +44,12 @@
 #include "mc/world/actor/bhave/node/SequenceBehaviorNode.h"
 #include "mc/world/actor/bhave/node/SubtreeNode.h"
 #include "mc/world/actor/player/Player.h"
+#include "mc/world/actor/state/PropertyComponent.h"
+#include "mc/world/actor/state/PropertyContainer.h"
+#include "mc/world/actor/state/PropertyGroup.h"
+#include "mc/world/actor/state/PropertyMetadata.h"
 #include "mc/world/level/Level.h"
+#include "mc/world/level/pathfinder/Path.h"
 #include "mc/world/phys/AABB.h"
 #include "mc/world/phys/HitResult.h"
 
@@ -47,9 +57,12 @@
 #include <array>
 #include <chrono>
 #include <fmt/format.h>
+#include <optional>
 #include <string_view>
 #include <typeinfo>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <Windows.h>
@@ -58,14 +71,24 @@ namespace creator_tools {
 
 namespace {
 
-constexpr auto          kBehaviorRefreshInterval = std::chrono::milliseconds{250};
-constexpr auto          kShapeRefreshInterval    = std::chrono::milliseconds{100};
-constexpr auto          kShapeResendInterval     = std::chrono::seconds{2}; // re-send even if unchanged, to self-heal
-constexpr std::size_t   kMaxDisplayedBehaviors   = 24;
-constexpr std::size_t   kMaxCollectedBehaviors   = 64;
-constexpr std::size_t   kMaxDebugTextLines       = 32;
-constexpr std::uint64_t kShapeIdBase             = 0x43544F4F4C530000ULL;
-constexpr std::uint64_t kBoxShapeId              = kShapeIdBase + kMaxDebugTextLines;
+constexpr auto        kBehaviorRefreshInterval = std::chrono::milliseconds{250};
+constexpr auto        kShapeRefreshInterval    = std::chrono::milliseconds{100};
+constexpr auto        kShapeResendInterval     = std::chrono::seconds{2}; // re-send even if unchanged, to self-heal
+constexpr std::size_t kMaxDisplayedBehaviors   = 24;
+constexpr std::size_t kMaxCollectedBehaviors   = 64;
+constexpr std::size_t kMaxDebugTextLines       = debug_shapes::kMaxTextLines;
+
+std::atomic<std::uint64_t> gHiddenNameTagRuntimeId{0};
+constexpr bool             kHideNameTagWhenSelected = true;
+
+// Path drawing.
+constexpr bool   kShowPath         = true;
+constexpr float  kPathHeightOffset = 0.1f;  // draw slightly above the ground so the line isn't buried in it
+constexpr float  kPathTargetRadius = 0.25f; // marker on the node the entity is walking to right now
+constexpr float  kPathDestRadius   = 0.40f; // marker on the final node of the path
+const mce::Color kPathLineColor{1.0f, 0.65f, 0.1f, 1.0f};
+const mce::Color kPathTargetColor{1.0f, 1.0f, 0.2f, 1.0f};
+const mce::Color kPathDestColor{1.0f, 0.2f, 0.2f, 1.0f};
 
 /// Flattens the definition tree into display entries. Containers (composites/decorators) are listed
 /// only if they have a name, and only those increase the indentation depth.
@@ -201,107 +224,116 @@ std::int64_t localPlayerUniqueId(Level& level) {
     return player ? player->getOrCreateUniqueID().rawID : 0;
 }
 
-PrimitiveShapeDataPayload makeTextShape(
-    std::uint64_t id,
-    Vec3 const&   locationOffset,
-    std::string   text,
-    mce::Color    color,
-    DimensionType dimension,
-    ActorUniqueID attachedTo
-) {
-    PrimitiveShapeDataPayload shape{};
-    shape.mNetworkId         = id;
-    shape.mShapeType         = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Text;
-    shape.mLocation          = locationOffset;
-    shape.mColor             = color;
-    shape.mDimensionId       = dimension;
-    shape.mAttachedToId      = attachedTo;
-    shape.mMaxRenderDistance = 64.0f;
+/// The part of an entity's path that is still ahead of it, as world positions.
+struct PathPoints {
+    std::vector<Vec3> points;      // [0] = the entity's feet, then each remaining node
+    bool              truncated{}; // the path was longer than kMaxPathSegments, so `points.back()` isn't the end
+};
 
-    TextDataPayload textPayload{};
-    textPayload.mText        = std::move(text);
-    textPayload.mUseRotation = false;
-    shape.mExtraDataPayload  = std::move(textPayload);
-    return shape;
-}
-
-PrimitiveShapeDataPayload makeBoxShape(
-    std::uint64_t id,
-    AABB const&   bounds,
-    Vec3 const&   locationOffset,
-    DimensionType dimension,
-    ActorUniqueID attachedTo
-) {
-    PrimitiveShapeDataPayload shape{};
-    shape.mNetworkId         = id;
-    shape.mShapeType         = ScriptModuleMinecraft::ScriptPrimitiveShapeType::Box;
-    shape.mLocation          = locationOffset;
-    shape.mColor             = mce::Color{0.2f, 0.9f, 1.0f, 1.0f};
-    shape.mDimensionId       = dimension;
-    shape.mAttachedToId      = attachedTo;
-    shape.mMaxRenderDistance = 64.0f;
-    shape.mExtraDataPayload  = BoxDataPayload{
-        Vec3{bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z}
-    };
-    return shape;
-}
-
-PrimitiveShapeDataPayload makeRemovedShape(std::uint64_t id) {
-    PrimitiveShapeDataPayload shape{};
-    shape.mNetworkId = id;
-    return shape;
-}
-
-/// Sends the shapes to the local player only. The integrated server may have LAN guests, and
-/// broadcasting with sendToClients() would show them our debug labels too.
-/// Server thread only. Returns false if the local player's server-side entity can't be found.
-///
-/// NOTE: relies on Packet::sendTo(Player const&); if your LeviLamina version names it differently,
-/// this is the one place to adjust.
-bool sendShapes(std::vector<PrimitiveShapeDataPayload> shapes, std::int64_t localPlayerId) {
-    if (localPlayerId == 0) {
-        return false;
+/// Reads the entity's current navigation path (server thread). nullopt means it has no active path.
+std::optional<PathPoints> collectPathPoints(Actor& entity, AABB const& bounds) {
+    auto navigation = entity.getEntityContext().tryGetComponent<NavigationComponent>();
+    if (!navigation) {
+        return std::nullopt;
     }
-    auto level = ll::service::getLevel();
-    if (!level) {
-        return false;
+    Path const* path = navigation->mPath.get();
+    if (!path) {
+        return std::nullopt;
     }
 
-    // Look the player up in the server's player list instead of dynamic_cast-ing an Actor: Minecraft's
-    // own classes have no usable RTTI, so dynamic_cast on them throws std::__non_rtti_object.
-    // (Only the behavior-definition/node classes in this file are safe to dynamic_cast.)
-    Player* player = nullptr;
-    level->forEachPlayer([&](Player& candidate) {
-        if (candidate.getOrCreateUniqueID().rawID == localPlayerId) {
-            player = &candidate;
-            return false; // stop iterating
+    auto const& nodes = path->mNodes.get();
+    auto const  index = static_cast<std::size_t>(path->mIndex); // the node the entity is heading to
+    if (index >= nodes.size()) {
+        return std::nullopt;
+    }
+
+    PathPoints out;
+    out.points.reserve(debug_shapes::kMaxPathSegments + 1);
+    out.points.push_back(
+        Vec3{
+            (bounds.min.x + bounds.max.x) * 0.5f,
+            bounds.min.y + kPathHeightOffset,
+            (bounds.min.z + bounds.max.z) * 0.5f
         }
-        return true;
-    });
-    if (!player) {
-        return false;
+    );
+    auto const end = std::min(nodes.size(), index + debug_shapes::kMaxPathSegments);
+    for (std::size_t i = index; i < end; ++i) {
+        auto const& pos = nodes[i].pos.get();
+        out.points.push_back(
+            Vec3{
+                static_cast<float>(pos.x) + 0.5f,
+                static_cast<float>(pos.y) + kPathHeightOffset,
+                static_cast<float>(pos.z) + 0.5f
+            }
+        );
     }
-
-    PrimitiveShapesPacket packet{};
-    packet.setSerializationMode(SerializationMode::CerealOnly);
-    packet.mShapes.get() = std::move(shapes);
-    packet.sendTo(*player);
-    return true;
+    out.truncated = end < nodes.size();
+    return out;
 }
 
-std::vector<PrimitiveShapeDataPayload> makeRemovalShapes() {
-    std::vector<PrimitiveShapeDataPayload> shapes;
-    shapes.reserve(kMaxDebugTextLines + 1);
-    for (std::size_t i = 0; i < kMaxDebugTextLines; ++i) {
-        shapes.push_back(makeRemovedShape(kShapeIdBase + i));
+/// Current values of the entity's `minecraft:entity` properties, as (name, value) text pairs.
+std::vector<std::pair<std::string, std::string>> collectEntityProperties(Actor& actor) {
+    std::vector<std::pair<std::string, std::string>> out;
+
+    auto props = actor.getEntityContext().tryGetComponent<PropertyComponent>();
+    if (!props) {
+        return out;
     }
-    shapes.push_back(makeRemovedShape(kBoxShapeId));
-    return shapes;
+
+    auto const& group     = *props->mPropertyGroup.get();
+    auto const& container = props->mPropertyContainer.get();
+
+    for (auto const& meta : group.mPropertyMetadata.get()) {
+        auto const& name  = meta.mName.get();
+        auto const  value = container.getValueVariant(name.getHash());
+
+        std::string text = "?";
+        if (value) {
+            text = std::visit(
+                [](auto const& v) -> std::string {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<T, std::string>) {
+                        return v;
+                    } else if constexpr (std::is_same_v<T, bool>) {
+                        return v ? "true" : "false";
+                    } else if constexpr (std::is_same_v<T, float>) {
+                        return fmt::format("{:.2f}", v);
+                    } else {
+                        return fmt::format("{}", v);
+                    }
+                },
+                *value
+            );
+        }
+        out.emplace_back(name.getString(), std::move(text));
+    }
+    return out;
 }
 
 } // namespace
 
-bool EntityDebugOverlay::enable() {
+LL_AUTO_TYPE_INSTANCE_HOOK(
+    HideSelectedNameTagHook,
+    ll::memory::HookPriority::Normal,
+    ActorRenderDispatcher,
+    &ActorRenderDispatcher::extractRenderTextObjects,
+    std::vector<NameTagRenderObject>,
+    Font&                font,
+    Tessellator&         tessellator,
+    Actor&               actor,
+    std::string const&   str,
+    Vec3                  camTargetPos,
+    float                 a,
+    mce::Color            color
+) {
+    auto const hidden = gHiddenNameTagRuntimeId.load(std::memory_order_relaxed);
+    if (kHideNameTagWhenSelected && hidden != 0 && static_cast<std::uint64_t>(actor.getRuntimeID()) == hidden) {
+        return {};
+    }
+    return origin(font, tessellator, actor, str, camTargetPos, a, color);
+}
+
+bool EntityInspector::enable() {
     mAlive->store(true);
 
     mMouseListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::MouseInputEvent>(
@@ -309,7 +341,8 @@ bool EntityDebugOverlay::enable() {
             if (event.actionButtonId() != MouseAction::ActionRight || event.buttonData() != MouseAction::DataDown) {
                 return;
             }
-            if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) == 0) {
+            auto const isDown = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
+            if (!isDown(VK_CONTROL) || !isDown(VK_SHIFT)) {
                 return;
             }
             if (!isMinecraftForeground() || !isGameplayActive()) {
@@ -331,13 +364,14 @@ bool EntityDebugOverlay::enable() {
                 return;
             }
 
-            // Swallow the click so Ctrl+right-click doesn't also trade with / mount / interact with the entity.
+            // Swallow the click so Ctrl+Shift+right-click doesn't also interact with the entity.
             event.cancel();
 
             auto const runtimeId = static_cast<std::uint64_t>(target->getRuntimeID());
             auto const selected  = mSelectedRuntimeId.load();
             auto const next      = selected == runtimeId ? 0 : runtimeId;
             mSelectedRuntimeId.store(next);
+            gHiddenNameTagRuntimeId.store(next, std::memory_order_relaxed);
             auto const generation = mSelectionGeneration.fetch_add(1) + 1;
             resetSelectionState();
             if (next == 0) {
@@ -349,9 +383,7 @@ bool EntityDebugOverlay::enable() {
                     if (!alive->load() || mSelectionGeneration.load() != generation) {
                         return;
                     }
-                    sendShapes(makeRemovalShapes(), mLocalPlayerUniqueId.load());
-                    mActiveTextShapeCount = 0;
-                    mLastSent             = {};
+                    clearShapesOnServer();
                 });
             }
             CreatorTools::getInstance().getSelf().getLogger().info(
@@ -408,14 +440,15 @@ bool EntityDebugOverlay::enable() {
     return true;
 }
 
-void EntityDebugOverlay::disable() {
+void EntityInspector::disable() {
     mMouseListener.reset();
     mRenderListener.reset();
     clearSelection(); // queues removal of the on-screen shapes
     mAlive->store(false);
 }
 
-void EntityDebugOverlay::clearSelection() {
+void EntityInspector::clearSelection() {
+    gHiddenNameTagRuntimeId.store(0, std::memory_order_relaxed);
     if (mSelectedRuntimeId.exchange(0) == 0) {
         return;
     }
@@ -425,7 +458,7 @@ void EntityDebugOverlay::clearSelection() {
     queueShapeRemoval(generation);
 }
 
-void EntityDebugOverlay::resetSelectionState() {
+void EntityInspector::resetSelectionState() {
     {
         std::scoped_lock lock(mBehaviorRefreshMutex);
         mNextBehaviorRefresh = {};
@@ -440,7 +473,7 @@ void EntityDebugOverlay::resetSelectionState() {
     }
 }
 
-void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId) {
+void EntityInspector::requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId) {
     auto const now = std::chrono::steady_clock::now();
     {
         std::scoped_lock lock(mBehaviorRefreshMutex);
@@ -539,7 +572,7 @@ void EntityDebugOverlay::requestBehaviorSnapshot(std::uint64_t runtimeId, std::i
     });
 }
 
-void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation) {
+void EntityInspector::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation) {
     auto const now = std::chrono::steady_clock::now();
     {
         std::scoped_lock lock(mShapeRefreshMutex);
@@ -572,130 +605,266 @@ void EntityDebugOverlay::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t
                     runtimeId
                 );
             }
-            sendShapes(makeRemovalShapes(), localPlayerId);
-            mActiveTextShapeCount = 0;
-            mLastSent             = {};
+            clearShapesOnServer();
             return;
         }
 
-        std::vector<DebugLine> lines;
-        auto                   addLine = [&lines](std::string text, bool highlighted = false) {
-            lines.push_back(DebugLine{std::move(text), highlighted});
-        };
+        updateInfoShapes(target, runtimeId, generation, localPlayerId);
+        if (kShowPath) {
+            updatePathShapes(*target, generation, localPlayerId);
+        }
+    });
+}
 
-        addLine(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()));
+/// Label (health, position, behaviors) and collision box. Both are attached to the entity, so they follow it
+/// on their own and only need re-sending when their content changes.
+void EntityInspector::updateInfoShapes(
+    Actor*        target,
+    std::uint64_t runtimeId,
+    std::uint64_t generation,
+    std::int64_t  localPlayerId
+) {
+    std::vector<DebugLine> lines;
+    auto                   addLine = [&lines](std::string text, bool highlighted = false) {
+        lines.push_back(DebugLine{std::move(text), highlighted});
+    };
 
-        auto const position = target->getPosition();
-        addLine(fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z));
+    addLine(fmt::format("Health: {}/{}", target->getHealth(), target->getMaxHealth()));
 
-        BehaviorSnapshot snapshot;
-        {
-            std::scoped_lock lock(mBehaviorSnapshotMutex);
-            if (mBehaviorSnapshot.runtimeId == runtimeId) {
-                snapshot = mBehaviorSnapshot;
+    auto const position = target->getPosition();
+    addLine(fmt::format("Position: {:.1f}, {:.1f}, {:.1f}", position.x, position.y, position.z));
+
+    auto const properties = collectEntityProperties(*target);
+    if (!properties.empty()) {
+        addLine("Properties:");
+        for (auto const& [name, value] : properties) {
+            addLine(fmt::format("  {}: {}", name, value));
+        }
+    }
+
+    BehaviorSnapshot snapshot;
+    {
+        std::scoped_lock lock(mBehaviorSnapshotMutex);
+        if (mBehaviorSnapshot.runtimeId == runtimeId) {
+            snapshot = mBehaviorSnapshot;
+        }
+    }
+
+    if (!snapshot.ready) {
+        addLine("Behaviors: checking...");
+    } else if (!snapshot.available) {
+        addLine("No behaviors");
+    } else {
+        addLine("Behaviors:");
+        if (!snapshot.treeName.empty()) {
+            addLine("Behavior tree: " + snapshot.treeName);
+        }
+
+        constexpr auto npos        = std::numeric_limits<std::size_t>::max();
+        std::size_t    activeIndex = npos;
+        for (std::size_t i = 0; i < snapshot.entries.size(); ++i) {
+            if (snapshot.entries[i].active) {
+                activeIndex = i;
+                break;
             }
         }
 
-        if (!snapshot.ready) {
-            addLine("Behaviors: checking...");
-        } else if (!snapshot.available) {
-            addLine("No behaviors");
-        } else {
-            addLine("Behaviors:");
-            if (!snapshot.treeName.empty()) {
-                addLine("Behavior tree: " + snapshot.treeName);
-            }
-
-            constexpr auto npos        = std::numeric_limits<std::size_t>::max();
-            std::size_t    activeIndex = npos;
-            for (std::size_t i = 0; i < snapshot.entries.size(); ++i) {
-                if (snapshot.entries[i].active) {
-                    activeIndex = i;
-                    break;
-                }
-            }
-
-            auto const visibleCount = std::min(snapshot.entries.size(), kMaxDisplayedBehaviors);
-            for (std::size_t i = 0; i < visibleCount; ++i) {
-                addLine(formatEntry(snapshot.entries[i]), snapshot.entries[i].active);
-            }
-            if (snapshot.entries.size() > visibleCount) {
-                addLine(fmt::format("... and {} more", snapshot.entries.size() - visibleCount));
-                // Don't hide the running behavior just because it is past the display limit.
-                if (activeIndex != npos && activeIndex >= visibleCount) {
-                    addLine(formatEntry(snapshot.entries[activeIndex]), true);
-                }
-            }
-
-            if (snapshot.entries.empty() && snapshot.activeName.empty() && snapshot.runtimeStateAvailable) {
-                addLine("No behavior entries");
-            } else if (!snapshot.runtimeStateAvailable) {
-                addLine("Runtime behavior state unavailable");
-            }
-            if (!snapshot.activeName.empty() && activeIndex == npos) {
-                addLine(snapshot.activeName, true);
+        auto const visibleCount = std::min(snapshot.entries.size(), kMaxDisplayedBehaviors);
+        for (std::size_t i = 0; i < visibleCount; ++i) {
+            addLine(formatEntry(snapshot.entries[i]), snapshot.entries[i].active);
+        }
+        if (snapshot.entries.size() > visibleCount) {
+            addLine(fmt::format("... and {} more", snapshot.entries.size() - visibleCount));
+            // Don't hide the running behavior just because it is past the display limit.
+            if (activeIndex != npos && activeIndex >= visibleCount) {
+                addLine(formatEntry(snapshot.entries[activeIndex]), true);
             }
         }
 
-        if (lines.size() > kMaxDebugTextLines) {
-            lines.resize(kMaxDebugTextLines);
+        if (snapshot.entries.empty() && snapshot.activeName.empty() && snapshot.runtimeStateAvailable) {
+            addLine("No behavior entries");
+        } else if (!snapshot.runtimeStateAvailable) {
+            addLine("Runtime behavior state unavailable");
         }
-
-        auto const& bounds         = target->getAABB();
-        auto const  dimension      = target->getDimensionId();
-        auto const  entityPosition = target->getPosition();
-        auto const  attachedTo     = target->getOrCreateUniqueID();
-        auto const  centerX        = (bounds.min.x + bounds.max.x) * 0.5f;
-        auto const  centerY        = (bounds.min.y + bounds.max.y) * 0.5f;
-        auto const  centerZ        = (bounds.min.z + bounds.max.z) * 0.5f;
-
-        // The shapes are attached to the entity, so they follow it on their own. Only send when the text
-        // or box changed (or every few seconds, to recover if the client lost them).
-        std::array<float, 6> const
-                   boundsKey{bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z};
-        auto const sendTime = std::chrono::steady_clock::now();
-        if (mLastSent.generation == generation && mLastSent.lines == lines && mLastSent.bounds == boundsKey
-            && sendTime - mLastSent.sentAt < kShapeResendInterval) {
-            return;
+        if (!snapshot.activeName.empty() && activeIndex == npos) {
+            addLine(snapshot.activeName, true);
         }
+    }
 
-        std::vector<DebugLine> sentLines = lines; // copy for the cache; `lines` is moved from below
+    if (lines.size() > kMaxDebugTextLines) {
+        lines.resize(kMaxDebugTextLines);
+    }
 
-        std::vector<PrimitiveShapeDataPayload> shapes;
-        shapes.reserve(lines.size() + mActiveTextShapeCount + 1);
-        for (std::size_t i = 0; i < lines.size(); ++i) {
-            auto const height = bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * 0.24f;
-            auto const color =
-                lines[i].highlighted ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
-            shapes.push_back(makeTextShape(
-                kShapeIdBase + i,
+    auto const& bounds         = target->getAABB();
+    auto const  dimension      = target->getDimensionId();
+    auto const  entityPosition = target->getPosition();
+    auto const  attachedTo     = target->getOrCreateUniqueID();
+    auto const  centerX        = (bounds.min.x + bounds.max.x) * 0.5f;
+    auto const  centerY        = (bounds.min.y + bounds.max.y) * 0.5f;
+    auto const  centerZ        = (bounds.min.z + bounds.max.z) * 0.5f;
+
+    // The shapes are attached to the entity, so they follow it on their own. Only send when the text
+    // or box changed (or every few seconds, to recover if the client lost them).
+    std::array<float, 6> const
+               boundsKey{bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z};
+    auto const sendTime = std::chrono::steady_clock::now();
+    if (mLastSent.generation == generation && mLastSent.lines == lines && mLastSent.bounds == boundsKey
+        && sendTime - mLastSent.sentAt < kShapeResendInterval) {
+        return;
+    }
+
+    std::vector<DebugLine> sentLines = lines; // copy for the cache; `lines` is moved from below
+
+    std::vector<PrimitiveShapeDataPayload> shapes;
+    shapes.reserve(lines.size() + mActiveTextShapeCount + 1);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        auto const height =
+            bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * (0.24f * debug_shapes::kTextScale);
+        auto const color =
+            lines[i].highlighted ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
+        shapes.push_back(
+            debug_shapes::makeTextShape(
+                debug_shapes::kTextBase + i,
                 Vec3{centerX - entityPosition.x, height - entityPosition.y, centerZ - entityPosition.z},
                 std::move(lines[i].text),
                 color,
                 dimension,
                 attachedTo
-            ));
-        }
-        for (std::size_t i = lines.size(); i < mActiveTextShapeCount; ++i) {
-            shapes.push_back(makeRemovedShape(kShapeIdBase + i));
-        }
-        shapes.push_back(makeBoxShape(
-            kBoxShapeId,
+            )
+        );
+    }
+    for (std::size_t i = lines.size(); i < mActiveTextShapeCount; ++i) {
+        shapes.push_back(debug_shapes::makeRemovedShape(debug_shapes::kTextBase + i));
+    }
+    shapes.push_back(
+        debug_shapes::makeBoxShape(
+            debug_shapes::kBox,
             bounds,
             Vec3{centerX - entityPosition.x, centerY - entityPosition.y, centerZ - entityPosition.z},
             dimension,
             attachedTo
-        ));
+        )
+    );
 
-        if (!sendShapes(std::move(shapes), localPlayerId)) {
-            return; // local player not available yet; try again on the next refresh
-        }
-        mActiveTextShapeCount = sentLines.size();
-        mLastSent             = SentState{generation, std::move(sentLines), boundsKey, sendTime};
-    });
+    if (!debug_shapes::send(std::move(shapes), localPlayerId)) {
+        return; // local player not available yet; try again on the next refresh
+    }
+    mActiveTextShapeCount = sentLines.size();
+    mLastSent             = SentState{generation, std::move(sentLines), boundsKey, sendTime};
 }
 
-void EntityDebugOverlay::queueShapeRemoval(std::uint64_t generation) {
+/// The entity's current navigation path: a line along the nodes still ahead of it, a marker on the node it is
+/// walking to now, and a larger marker on the final node. These are world-space shapes (not attached to the
+/// entity), so they are re-sent whenever the entity moves or the path changes.
+void EntityInspector::updatePathShapes(Actor& target, std::uint64_t generation, std::int64_t localPlayerId) {
+    auto const now    = std::chrono::steady_clock::now();
+    auto const bounds = target.getAABB();
+    auto const path   = collectPathPoints(target, bounds);
+
+    if (!path) {
+        // No active path: take down whatever was drawn for the previous one.
+        if (mActivePathSegmentCount != 0 || mTargetMarkerActive || mDestinationMarkerActive) {
+            std::vector<PrimitiveShapeDataPayload> batch;
+            debug_shapes::appendRemovedPathShapes(
+                batch,
+                0,
+                mActivePathSegmentCount,
+                mTargetMarkerActive,
+                mDestinationMarkerActive
+            );
+            if (!debug_shapes::send(std::move(batch), localPlayerId)) {
+                return; // try again on the next refresh
+            }
+        }
+        resetPathState();
+        return;
+    }
+
+    auto const&                       points = path->points;
+    std::vector<std::array<float, 3>> key;
+    key.reserve(points.size());
+    for (auto const& point : points) {
+        key.push_back({point.x, point.y, point.z});
+    }
+    if (mLastPathSent.generation == generation && mLastPathSent.points == key
+        && mLastPathSent.truncated == path->truncated && now - mLastPathSent.sentAt < kShapeResendInterval) {
+        return;
+    }
+
+    auto const dimension    = target.getDimensionId();
+    auto const segmentCount = points.size() - 1;
+
+    std::vector<PrimitiveShapeDataPayload> batch;
+    batch.reserve(segmentCount + mActivePathSegmentCount + 2);
+    for (std::size_t i = 0; i < segmentCount; ++i) {
+        batch.push_back(
+            debug_shapes::makeLineShape(
+                debug_shapes::kPathLineBase + i,
+                points[i],
+                points[i + 1],
+                kPathLineColor,
+                dimension
+            )
+        );
+    }
+    // The path got shorter: remove the segments that no longer exist.
+    debug_shapes::appendRemovedPathShapes(batch, segmentCount, mActivePathSegmentCount, false, false);
+
+    // points[1] is the node being walked to. When it is also the last node, only the destination marker is shown.
+    bool const showTarget      = points.size() > 2;
+    bool const showDestination = !path->truncated;
+    if (showTarget) {
+        batch.push_back(
+            debug_shapes::makeSphereShape(
+                debug_shapes::kPathTarget,
+                points[1],
+                kPathTargetRadius,
+                kPathTargetColor,
+                dimension
+            )
+        );
+    } else if (mTargetMarkerActive) {
+        batch.push_back(debug_shapes::makeRemovedShape(debug_shapes::kPathTarget));
+    }
+    if (showDestination) {
+        batch.push_back(
+            debug_shapes::makeSphereShape(
+                debug_shapes::kPathDestination,
+                points.back(),
+                kPathDestRadius,
+                kPathDestColor,
+                dimension
+            )
+        );
+    } else if (mDestinationMarkerActive) {
+        batch.push_back(debug_shapes::makeRemovedShape(debug_shapes::kPathDestination));
+    }
+
+    if (!debug_shapes::send(std::move(batch), localPlayerId)) {
+        return; // local player not available yet; try again on the next refresh
+    }
+    mActivePathSegmentCount  = segmentCount;
+    mTargetMarkerActive      = showTarget;
+    mDestinationMarkerActive = showDestination;
+    mLastPathSent            = SentPathState{generation, std::move(key), path->truncated, now};
+}
+
+void EntityInspector::resetPathState() {
+    mActivePathSegmentCount  = 0;
+    mTargetMarkerActive      = false;
+    mDestinationMarkerActive = false;
+    mLastPathSent            = {};
+}
+
+/// Removes every shape this mod draws and forgets what was sent (server thread).
+void EntityInspector::clearShapesOnServer() {
+    debug_shapes::send(debug_shapes::makeRemovalOfAll(), mLocalPlayerUniqueId.load());
+    mActiveTextShapeCount = 0;
+    mLastSent             = {};
+    resetPathState();
+}
+
+void EntityInspector::queueShapeRemoval(std::uint64_t generation) {
     if (!ll::service::getServerInstance()) {
         return;
     }
@@ -705,9 +874,7 @@ void EntityDebugOverlay::queueShapeRemoval(std::uint64_t generation) {
         if (mSelectionGeneration.load() != generation || mSelectedRuntimeId.load() != 0) {
             return;
         }
-        sendShapes(makeRemovalShapes(), mLocalPlayerUniqueId.load());
-        mActiveTextShapeCount = 0;
-        mLastSent             = {};
+        clearShapesOnServer();
     });
 }
 

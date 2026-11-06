@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mod/CommandHistory.h"
-#include "mod/EntityDebugOverlay.h"
+#include "mod/EntityInspector.h"
 
 #include "ll/api/event/ListenerBase.h"
 #include "ll/api/event/input/KeyInputEvent.h"
@@ -49,7 +49,7 @@ private:
     };
 
     ll::mod::NativeMod&                   mSelf;
-    EntityDebugOverlay                    mEntityDebugOverlay;
+    EntityInspector                       mEntityInspector;
     CommandHistory                        mCommandHistory;
     ll::event::ListenerPtr                mListener;
     std::vector<Binding>                  mBindings;

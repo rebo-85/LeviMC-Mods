@@ -295,7 +295,7 @@ bool CreatorTools::load() {
 
 bool CreatorTools::enable() {
     mAlive->store(true);
-    mEntityDebugOverlay.enable();
+    mEntityInspector.enable();
     mCommandHistory.enable();
 
     // G is intentionally not consumed (plain key, only active on the HUD). The R bindings are consumed
@@ -318,7 +318,7 @@ bool CreatorTools::enable() {
 bool CreatorTools::disable() {
     mAlive->store(false);
     mListener.reset();
-    mEntityDebugOverlay.disable();
+    mEntityInspector.disable();
     mCommandHistory.disable();
     mBindings.clear();
     getSelf().getLogger().info("Disabled");

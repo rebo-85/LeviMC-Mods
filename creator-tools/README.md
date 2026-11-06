@@ -12,7 +12,7 @@ Creator Tools is a small LeviLamina utility mod that speeds up creator-style wor
 | `Ctrl` + `R`           | Reload behavior resources without leaving the world (on a remote server it sends `/reload`)                                                        | Local worlds and servers         | Local world, or operator on a server |
 | `Ctrl` + `Shift` + `R` | Reload behavior packs (loot tables, entities, ...) with `/reload all`, run inside the live local server; on a remote server it sends `/reload all` | Local worlds (servers: operator) | Local world                          |
 | `Shift` + `R`          | Refresh client packs, then reload animations, geometries, textures, fonts and UI                                                                   | Anywhere                         | —                                    |
-| `Ctrl` + right-click   | Toggle the debug label on the targeted entity                                                                                                      | Local worlds only                | Integrated server                    |
+| `Ctrl` + `Shift` + right-click | Toggle debug features on the targeted entity                                                                                                 | Local worlds only                | Integrated server                    |
 
 Modifiers must match exactly: `G` only fires with no Ctrl, Shift or Alt held, and `Ctrl+R`, `Shift+R` and `Ctrl+Shift+R` never overlap.
 
@@ -43,20 +43,33 @@ Vanilla remembers the commands you have sent only until you close the game. Crea
 - The first line of the file (`# newest=front` or `# newest=back`) records how the game orders its history. The mod learns this by watching the first couple of commands you send, then reuses it. Don't remove that line.
 - It works in every world and on every server, since it is part of the client's chat history and not tied to a world.
 
-### Entity debug label
+### Entity debug
 
-Aim at an entity and `Ctrl`+right-click to show world-space text above it with health, position and behavior-tree details, plus a wireframe of its collision box. Click the same entity again to hide it.
+Aim at an entity and `Ctrl`+`Shift`+right-click to show world-space text above it with health, position, properties and behavior-tree details, plus a wireframe of its collision box. Click the same entity again to hide it.
 
 - Behavior details are read from the local world's integrated server.
 - The running behavior is highlighted green. It is matched by the actual node, so two behaviors with the same name are not both highlighted. Nested entries are marked with `>` per level, and the running behavior stays visible even when the list is truncated.
 - The label is shown only to you, not to LAN guests.
-- `Ctrl`+right-click on an entity is consumed by the mod and won't also trigger the normal interaction (trading, mounting, etc.).
+- While an entity is selected, its vanilla name tag is hidden so it doesn't overlap the debug label.
+- `Ctrl`+`Shift`+right-click on an entity is consumed by the mod and won't also trigger the normal interaction (trading, mounting, etc.). A plain `Ctrl`+right-click, including when Ctrl is bound to sneak, is not affected.
+
+#### Path visualization
+
+While an entity is selected and it has an active navigation path, the path is drawn in the world:
+
+- An orange line runs from the entity along the remaining path nodes. It shortens as the entity advances and disappears when the path ends.
+- A small yellow sphere marks the node the entity is walking to right now.
+- A larger red sphere marks the final node of the path.
+- Up to 48 segments are drawn. If the path is longer, the red destination marker is left out, since the last drawn node isn't the real end.
+- Entities with no navigation (players, items, most non-mobs) simply show no path.
+
+Colors, marker sizes and the on/off switch (`kShowPath`) are constants at the top of `EntityInspector.cpp`.
 
 ## Known limitations
 
 - Windows only (keyboard state and window focus use the Win32 API).
 - On remote servers `G`, `Ctrl+R` and `Ctrl+Shift+R` fall back to sending `/gamemode`, `/reload` and `/reload all`, so they need operator permission. Local worlds use direct server calls and need no cheats.
-- The entity debug label and behavior-tree details need a local world with an integrated server.
+- The entity debug label, behavior-tree details and path visualization need a local world with an integrated server.
 - Only one `Shift+R` client reload can run at a time. Extra presses are ignored with a chat message.
 - The saved command history is shared across all worlds and servers, is stored unencrypted on disk, and holds slash commands only. Avoid typing secrets (such as passwords in commands) if that matters to you; `kOnlyCommands` in `CommandHistory.cpp` controls what is saved.
 

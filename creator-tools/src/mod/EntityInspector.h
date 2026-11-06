@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+class Actor;
+
 namespace creator_tools {
 
 /// One node of the entity's behavior tree, flattened for display.
@@ -28,7 +30,9 @@ struct DebugLine {
     bool        operator==(DebugLine const&) const = default;
 };
 
-class EntityDebugOverlay {
+/// Ctrl+right-click an entity to inspect it: a text label (health, position, behaviors), its collision box,
+/// and the path it is currently walking, drawn as world-space debug shapes.
+class EntityInspector {
 public:
     bool enable();
     void disable();
@@ -44,11 +48,19 @@ private:
         std::string                activeName;
     };
 
-    /// What the server thread last sent, so unchanged frames can be skipped.
+    /// What the server thread last sent for the label/box, so unchanged frames can be skipped.
     struct SentState {
         std::uint64_t                         generation{std::numeric_limits<std::uint64_t>::max()};
         std::vector<DebugLine>                lines;
         std::array<float, 6>                  bounds{};
+        std::chrono::steady_clock::time_point sentAt{};
+    };
+
+    /// What the server thread last sent for the path.
+    struct SentPathState {
+        std::uint64_t                         generation{std::numeric_limits<std::uint64_t>::max()};
+        std::vector<std::array<float, 3>>     points;
+        bool                                  truncated{};
         std::chrono::steady_clock::time_point sentAt{};
     };
 
@@ -57,6 +69,12 @@ private:
     void requestBehaviorSnapshot(std::uint64_t runtimeId, std::int64_t uniqueId);
     void queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t generation);
     void queueShapeRemoval(std::uint64_t generation);
+
+    // Server thread only.
+    void updateInfoShapes(Actor* target, std::uint64_t runtimeId, std::uint64_t generation, std::int64_t localPlayerId);
+    void updatePathShapes(Actor& target, std::uint64_t generation, std::int64_t localPlayerId);
+    void clearShapesOnServer();
+    void resetPathState();
 
     ll::event::ListenerPtr                mMouseListener;
     ll::event::ListenerPtr                mRenderListener;
@@ -67,12 +85,18 @@ private:
     std::mutex                            mShapeRefreshMutex;
     std::chrono::steady_clock::time_point mNextShapeRefresh{};
     std::atomic<std::uint64_t>            mLastShapeWarningGeneration{std::numeric_limits<std::uint64_t>::max()};
-    std::size_t                           mActiveTextShapeCount{}; // server thread only
-    SentState                             mLastSent;               // server thread only
     std::mutex                            mBehaviorRefreshMutex;
     std::mutex                            mBehaviorSnapshotMutex;
     BehaviorSnapshot                      mBehaviorSnapshot;
     std::chrono::steady_clock::time_point mNextBehaviorRefresh{};
+
+    // Server thread only.
+    std::size_t   mActiveTextShapeCount{};
+    SentState     mLastSent;
+    std::size_t   mActivePathSegmentCount{};
+    bool          mTargetMarkerActive{};
+    bool          mDestinationMarkerActive{};
+    SentPathState mLastPathSent;
 
     // Queued server-thread tasks check this so they do nothing after the mod is disabled.
     std::shared_ptr<std::atomic_bool> const mAlive{std::make_shared<std::atomic_bool>(false)};
