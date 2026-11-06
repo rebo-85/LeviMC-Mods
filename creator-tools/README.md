@@ -18,6 +18,16 @@ Modifiers must match exactly: `G` only fires with no Ctrl, Shift or Alt held, an
 
 Hotkeys only fire when Minecraft is the foreground window and the in-game HUD is the active screen. They are ignored in menus, chat, the inventory, and text-entry screens such as the anvil, signs, books and command blocks, so typing a "g" never changes your game mode.
 
+## Configuration
+
+On first load, Creator Tools creates `config.json` in the mod's config folder with default values. Missing fields are filled with defaults. The file is read when the mod loads, so restart Minecraft after changing it.
+
+- `hotkeys.gamemode` and `hotkeys.reload` accept a letter, digit or function key from `F1` through `F12`.
+- `entityDebug.inspectCtrl`, `inspectShift` and `inspectAlt` set the exact modifier combination for the inspect right-click. At least one must be enabled; the default is Ctrl+Shift.
+- `entityDebug.hideNameTag`, `entityDebug.labelScale` and `entityDebug.maxBehaviors` control the selected entity's name tag and label.
+- `entityDebug.showPath`, `entityDebug.pathHeightOffset`, `entityDebug.pathTargetRadius` and `entityDebug.pathDestRadius` control path display.
+- `entityDebug.pathLineColor`, `entityDebug.pathTargetColor` and `entityDebug.pathDestColor` are `[r, g, b, a]` arrays with channel values from 0 to 1.
+
 ## Features
 
 ### Game mode cycling
@@ -63,7 +73,7 @@ While an entity is selected and it has an active navigation path, the path is dr
 - Up to 48 segments are drawn. If the path is longer, the red destination marker is left out, since the last drawn node isn't the real end.
 - Entities with no navigation (players, items, most non-mobs) simply show no path.
 
-Colors, marker sizes and the on/off switch (`kShowPath`) are constants at the top of `EntityInspector.cpp`.
+Colors, marker sizes and the on/off switch are configurable in `config.json`.
 
 ## Known limitations
 

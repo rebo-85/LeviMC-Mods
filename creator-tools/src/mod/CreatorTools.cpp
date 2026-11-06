@@ -5,6 +5,7 @@
 #include "mod/GameplayState.h"
 #include "mod/ServerActions.h"
 
+#include "ll/api/Config.h"
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/input/KeyInputEvent.h"
 #include "ll/api/mod/RegisterHelper.h"
@@ -21,11 +22,17 @@
 #include "mc/world/level/Level.h"
 
 #include <atomic>
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
+#include <exception>
 #include <fmt/format.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -35,9 +42,6 @@
 namespace creator_tools {
 
 namespace {
-constexpr int kKeyG = 'G';
-constexpr int kKeyR = 'R';
-
 constexpr unsigned kModNone  = 0;
 constexpr unsigned kModCtrl  = 1;
 constexpr unsigned kModShift = 2;
@@ -66,6 +70,38 @@ unsigned currentModifiers() {
 std::int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+std::optional<int> parseKey(std::string_view text) {
+    if (text.size() == 1) {
+        auto const key = text.front();
+        if ((key >= 'A' && key <= 'Z') || (key >= 'a' && key <= 'z')) {
+            return key >= 'a' ? key - ('a' - 'A') : key;
+        }
+        if (key >= '0' && key <= '9') {
+            return key;
+        }
+    }
+    if (text.size() >= 2 && (text.front() == 'F' || text.front() == 'f')) {
+        int number = 0;
+        auto const result = std::from_chars(text.data() + 1, text.data() + text.size(), number);
+        if (result.ec == std::errc{} && result.ptr == text.data() + text.size() && number >= 1 && number <= 12) {
+            return VK_F1 + number - 1;
+        }
+    }
+    return std::nullopt;
+}
+
+int configuredKey(std::string const& text, int fallback, std::string_view name) {
+    if (auto key = parseKey(text)) {
+        return *key;
+    }
+    CreatorTools::getInstance().getSelf().getLogger().warn(
+        "Invalid hotkeys.{} value '{}'; using the default",
+        name,
+        text
+    );
+    return fallback;
 }
 
 /// Returns the new reload's generation, or 0 if a reload is already running.
@@ -289,6 +325,49 @@ void CreatorTools::reloadAll() {
 }
 
 bool CreatorTools::load() {
+    auto& logger    = getSelf().getLogger();
+    auto const path = getSelf().getConfigDir() / "config.json";
+    bool needsRewrite;
+    try {
+        needsRewrite = !ll::config::loadConfig(mConfig, path);
+    } catch (std::exception const& error) {
+        logger.error("Could not load {}: {}", path.string(), error.what());
+        return false;
+    }
+
+    auto& entityDebug = mConfig.entityDebug;
+    entityDebug.maxBehaviors = std::clamp(entityDebug.maxBehaviors, 1, 64);
+    if (!entityDebug.inspectCtrl && !entityDebug.inspectShift && !entityDebug.inspectAlt) {
+        logger.warn("entityDebug: no inspect modifier set; using Ctrl+Shift");
+        entityDebug.inspectCtrl  = true;
+        entityDebug.inspectShift = true;
+    }
+
+    auto clampFloat = [&logger](float& value, float fallback, float min, float max, char const* name) {
+        if (!std::isfinite(value)) {
+            logger.warn("{} must be finite; using {}", name, fallback);
+            value = fallback;
+        }
+        value = std::clamp(value, min, max);
+    };
+    clampFloat(entityDebug.labelScale, 0.3f, 0.05f, 2.0f, "entityDebug.labelScale");
+    clampFloat(entityDebug.pathHeightOffset, 0.1f, 0.0f, 5.0f, "entityDebug.pathHeightOffset");
+    clampFloat(entityDebug.pathTargetRadius, 0.25f, 0.01f, 5.0f, "entityDebug.pathTargetRadius");
+    clampFloat(entityDebug.pathDestRadius, 0.40f, 0.01f, 5.0f, "entityDebug.pathDestRadius");
+    auto clampColor = [&clampFloat](std::array<float, 4>& color, char const* name) {
+        for (auto& channel : color) {
+            clampFloat(channel, 1.0f, 0.0f, 1.0f, name);
+        }
+    };
+    clampColor(entityDebug.pathLineColor, "entityDebug.pathLineColor");
+    clampColor(entityDebug.pathTargetColor, "entityDebug.pathTargetColor");
+    clampColor(entityDebug.pathDestColor, "entityDebug.pathDestColor");
+
+    if (needsRewrite && !ll::config::saveConfig(mConfig, path)) {
+        logger.error("Could not write updated config to {}", path.string());
+        return false;
+    }
+
     getSelf().getLogger().info("Loaded");
     return true;
 }
@@ -300,11 +379,13 @@ bool CreatorTools::enable() {
 
     // G is intentionally not consumed (plain key, only active on the HUD). The R bindings are consumed
     // so the game never sees Ctrl/Shift+R.
+    auto const gamemodeKey = configuredKey(mConfig.hotkeys.gamemode, 'G', "gamemode");
+    auto const reloadKey   = configuredKey(mConfig.hotkeys.reload, 'R', "reload");
     mBindings = {
-        Binding{kKeyG, kModNone,             false, [this] { requestGamemodeCycle(); }   },
-        Binding{kKeyR, kModCtrl,             true,  [this] { reloadBehaviorResources(); }},
-        Binding{kKeyR, kModCtrl | kModShift, true,  [this] { reloadAll(); }              },
-        Binding{kKeyR, kModShift,            true,  [] { reloadClientAssets(); }         },
+        Binding{gamemodeKey, kModNone,             false, [this] { requestGamemodeCycle(); }   },
+        Binding{reloadKey,   kModCtrl,             true,  [this] { reloadBehaviorResources(); }},
+        Binding{reloadKey,   kModCtrl | kModShift, true,  [this] { reloadAll(); }              },
+        Binding{reloadKey,   kModShift,            true,  [] { reloadClientAssets(); }         },
     };
 
     mListener = ll::event::EventBus::getInstance().emplaceListener<ll::event::KeyInputEvent>(

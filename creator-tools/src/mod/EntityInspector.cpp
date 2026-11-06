@@ -1,4 +1,5 @@
 #include "mod/EntityInspector.h"
+#include "mod/Config.h"
 #include "mod/CreatorTools.h"
 #include "mod/DebugShapes.h"
 #include "mod/GameplayState.h"
@@ -74,21 +75,16 @@ namespace {
 constexpr auto        kBehaviorRefreshInterval = std::chrono::milliseconds{250};
 constexpr auto        kShapeRefreshInterval    = std::chrono::milliseconds{100};
 constexpr auto        kShapeResendInterval     = std::chrono::seconds{2}; // re-send even if unchanged, to self-heal
-constexpr std::size_t kMaxDisplayedBehaviors   = 24;
 constexpr std::size_t kMaxCollectedBehaviors   = 64;
 constexpr std::size_t kMaxDebugTextLines       = debug_shapes::kMaxTextLines;
 
 std::atomic<std::uint64_t> gHiddenNameTagRuntimeId{0};
-constexpr bool             kHideNameTagWhenSelected = true;
 
-// Path drawing.
-constexpr bool   kShowPath         = true;
-constexpr float  kPathHeightOffset = 0.1f;  // draw slightly above the ground so the line isn't buried in it
-constexpr float  kPathTargetRadius = 0.25f; // marker on the node the entity is walking to right now
-constexpr float  kPathDestRadius   = 0.40f; // marker on the final node of the path
-const mce::Color kPathLineColor{1.0f, 0.65f, 0.1f, 1.0f};
-const mce::Color kPathTargetColor{1.0f, 1.0f, 0.2f, 1.0f};
-const mce::Color kPathDestColor{1.0f, 0.2f, 0.2f, 1.0f};
+Config::EntityDebug const& cfg() { return CreatorTools::getInstance().getConfig().entityDebug; }
+
+mce::Color toColor(std::array<float, 4> const& color) {
+    return mce::Color{color[0], color[1], color[2], color[3]};
+}
 
 /// Flattens the definition tree into display entries. Containers (composites/decorators) are listed
 /// only if they have a name, and only those increase the indentation depth.
@@ -252,7 +248,7 @@ std::optional<PathPoints> collectPathPoints(Actor& entity, AABB const& bounds) {
     out.points.push_back(
         Vec3{
             (bounds.min.x + bounds.max.x) * 0.5f,
-            bounds.min.y + kPathHeightOffset,
+            bounds.min.y + cfg().pathHeightOffset,
             (bounds.min.z + bounds.max.z) * 0.5f
         }
     );
@@ -262,7 +258,7 @@ std::optional<PathPoints> collectPathPoints(Actor& entity, AABB const& bounds) {
         out.points.push_back(
             Vec3{
                 static_cast<float>(pos.x) + 0.5f,
-                static_cast<float>(pos.y) + kPathHeightOffset,
+                static_cast<float>(pos.y) + cfg().pathHeightOffset,
                 static_cast<float>(pos.z) + 0.5f
             }
         );
@@ -327,7 +323,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     mce::Color            color
 ) {
     auto const hidden = gHiddenNameTagRuntimeId.load(std::memory_order_relaxed);
-    if (kHideNameTagWhenSelected && hidden != 0 && static_cast<std::uint64_t>(actor.getRuntimeID()) == hidden) {
+    if (cfg().hideNameTag && hidden != 0 && static_cast<std::uint64_t>(actor.getRuntimeID()) == hidden) {
         return {};
     }
     return origin(font, tessellator, actor, str, camTargetPos, a, color);
@@ -342,7 +338,9 @@ bool EntityInspector::enable() {
                 return;
             }
             auto const isDown = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
-            if (!isDown(VK_CONTROL) || !isDown(VK_SHIFT)) {
+            auto const& config = cfg();
+            if (isDown(VK_CONTROL) != config.inspectCtrl || isDown(VK_SHIFT) != config.inspectShift
+                || isDown(VK_MENU) != config.inspectAlt) {
                 return;
             }
             if (!isMinecraftForeground() || !isGameplayActive()) {
@@ -610,7 +608,7 @@ void EntityInspector::queueShapeUpdate(std::uint64_t runtimeId, std::uint64_t ge
         }
 
         updateInfoShapes(target, runtimeId, generation, localPlayerId);
-        if (kShowPath) {
+        if (cfg().showPath) {
             updatePathShapes(*target, generation, localPlayerId);
         }
     });
@@ -669,7 +667,7 @@ void EntityInspector::updateInfoShapes(
             }
         }
 
-        auto const visibleCount = std::min(snapshot.entries.size(), kMaxDisplayedBehaviors);
+        auto const visibleCount = std::min(snapshot.entries.size(), static_cast<std::size_t>(cfg().maxBehaviors));
         for (std::size_t i = 0; i < visibleCount; ++i) {
             addLine(formatEntry(snapshot.entries[i]), snapshot.entries[i].active);
         }
@@ -717,9 +715,9 @@ void EntityInspector::updateInfoShapes(
 
     std::vector<PrimitiveShapeDataPayload> shapes;
     shapes.reserve(lines.size() + mActiveTextShapeCount + 1);
+    auto const scale = cfg().labelScale;
     for (std::size_t i = 0; i < lines.size(); ++i) {
-        auto const height =
-            bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * (0.24f * debug_shapes::kTextScale);
+        auto const height = bounds.max.y + 0.2f + static_cast<float>(lines.size() - i - 1) * (0.24f * scale);
         auto const color =
             lines[i].highlighted ? mce::Color{0.2f, 1.0f, 0.2f, 1.0f} : mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
         shapes.push_back(
@@ -729,7 +727,8 @@ void EntityInspector::updateInfoShapes(
                 std::move(lines[i].text),
                 color,
                 dimension,
-                attachedTo
+                attachedTo,
+                scale
             )
         );
     }
@@ -802,7 +801,7 @@ void EntityInspector::updatePathShapes(Actor& target, std::uint64_t generation, 
                 debug_shapes::kPathLineBase + i,
                 points[i],
                 points[i + 1],
-                kPathLineColor,
+                toColor(cfg().pathLineColor),
                 dimension
             )
         );
@@ -818,8 +817,8 @@ void EntityInspector::updatePathShapes(Actor& target, std::uint64_t generation, 
             debug_shapes::makeSphereShape(
                 debug_shapes::kPathTarget,
                 points[1],
-                kPathTargetRadius,
-                kPathTargetColor,
+                cfg().pathTargetRadius,
+                toColor(cfg().pathTargetColor),
                 dimension
             )
         );
@@ -831,8 +830,8 @@ void EntityInspector::updatePathShapes(Actor& target, std::uint64_t generation, 
             debug_shapes::makeSphereShape(
                 debug_shapes::kPathDestination,
                 points.back(),
-                kPathDestRadius,
-                kPathDestColor,
+                cfg().pathDestRadius,
+                toColor(cfg().pathDestColor),
                 dimension
             )
         );

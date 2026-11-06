@@ -16,7 +16,6 @@ namespace creator_tools::debug_shapes {
 // Shape IDs. Each group has its own range so groups can be updated and removed independently.
 inline constexpr std::uint64_t kIdBase       = 0x43544F4F4C530000ULL;
 inline constexpr std::size_t   kMaxTextLines = 48;
-inline constexpr float         kTextScale    = 0.3f;
 inline constexpr std::uint64_t kTextBase     = kIdBase;                 // + line index
 inline constexpr std::uint64_t kBox          = kIdBase + kMaxTextLines; // collision box wireframe
 
@@ -32,7 +31,8 @@ PrimitiveShapeDataPayload makeTextShape(
     std::string   text,
     mce::Color    color,
     DimensionType dimension,
-    ActorUniqueID attachedTo
+    ActorUniqueID attachedTo,
+    float         scale
 );
 
 /// Wireframe box attached to an entity. `locationOffset` is relative to the entity.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mod/CommandHistory.h"
+#include "mod/Config.h"
 #include "mod/EntityInspector.h"
 
 #include "ll/api/event/ListenerBase.h"
@@ -25,6 +26,7 @@ public:
     CreatorTools() : mSelf(*ll::mod::NativeMod::current()) {}
 
     [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
+    [[nodiscard]] Config const&      getConfig() const { return mConfig; }
 
     /// @return True if the mod is loaded successfully.
     bool load();
@@ -49,6 +51,7 @@ private:
     };
 
     ll::mod::NativeMod&                   mSelf;
+    Config                                mConfig;
     EntityInspector                       mEntityInspector;
     CommandHistory                        mCommandHistory;
     ll::event::ListenerPtr                mListener;

@@ -26,7 +26,8 @@ PrimitiveShapeDataPayload makeTextShape(
     std::string   text,
     mce::Color    color,
     DimensionType dimension,
-    ActorUniqueID attachedTo
+    ActorUniqueID attachedTo,
+    float         scale
 ) {
     PrimitiveShapeDataPayload shape{};
     shape.mNetworkId         = id;
@@ -36,7 +37,7 @@ PrimitiveShapeDataPayload makeTextShape(
     shape.mDimensionId       = dimension;
     shape.mAttachedToId      = attachedTo;
     shape.mMaxRenderDistance = kMaxRenderDistance;
-    shape.mScale             = kTextScale;
+    shape.mScale             = scale;
 
     TextDataPayload textPayload{};
     textPayload.mText        = std::move(text);
