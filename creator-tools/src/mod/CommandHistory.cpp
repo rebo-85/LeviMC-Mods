@@ -4,17 +4,22 @@
 
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/render/UIRenderEvent.h"
+#include "ll/api/memory/Hook.h"
 #include "ll/api/service/Bedrock.h"
 #include "ll/api/thread/ClientThreadExecutor.h"
 
 #include "mc/client/game/ClientInstance.h"
+#include "mc/client/network/ClientNetworkHandler.h"
+#include "mc/network/packet/CommandOutputPacket.h"
 #include "mc/server/commands/CommandRegistry.h"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,6 +49,28 @@ bool shouldPersist(std::string const& entry) {
     return !kOnlyCommands || entry.front() == '/';
 }
 
+/// "/Gamemode creative" -> "gamemode"; also accepts a bare "gamemode" or "/gamemode".
+std::string commandWord(std::string_view text) {
+    if (!text.empty() && text.front() == '/') {
+        text.remove_prefix(1);
+    }
+    std::string word{text.substr(0, text.find_first_of(" \t"))};
+    for (auto& c : word) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return word;
+}
+
+std::string_view trimmed(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
 /// True if the client's command registry knows the command word of `entry` ("/gamemode creative" -> "gamemode").
 /// If the registry isn't available we can't tell, so the entry is accepted.
 bool isKnownCommand(std::string const& entry) {
@@ -52,12 +79,7 @@ bool isKnownCommand(std::string const& entry) {
         return true;
     }
 
-    std::string_view rest{entry};
-    rest.remove_prefix(1);
-    std::string name{rest.substr(0, rest.find_first_of(" \t"))};
-    for (auto& c : name) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
+    auto const name = commandWord(entry);
     if (name.empty()) {
         return false;
     }
@@ -70,11 +92,30 @@ bool isKnownCommand(std::string const& entry) {
     return false;
 }
 
+/// A command the server answered with a syntax / unknown-command error. Filled by the packet hook (which may
+/// run on another thread) and drained on the client thread by the poll.
+struct Rejection {
+    enum class Kind { Line, CommandName } kind;
+    std::string text; // Line: the whole command line. CommandName: the unknown command word.
+};
+
+std::mutex             gRejectedMutex;
+std::vector<Rejection> gRejected;
+
+void queueRejection(Rejection rejection) {
+    std::lock_guard lock{gRejectedMutex};
+    if (gRejected.size() < 64) {
+        gRejected.push_back(std::move(rejection));
+    }
+}
+
+std::vector<Rejection> takeRejections() {
+    std::lock_guard lock{gRejectedMutex};
+    return std::exchange(gRejected, {});
+}
+
 /// Entries already in `trusted` are kept as-is so an unavailable or incomplete registry cannot wipe saved history.
-std::deque<std::string> persistable(
-    std::deque<std::string> const& history,
-    std::deque<std::string> const& trusted
-) {
+std::deque<std::string> persistable(std::deque<std::string> const& history, std::deque<std::string> const& trusted) {
     std::deque<std::string> out;
     for (auto const& entry : history) {
         if (!shouldPersist(entry)) {
@@ -197,6 +238,39 @@ bool save(std::deque<std::string> const& history, std::optional<bool> newestAtFr
 
 } // namespace
 
+// The server answers every command with a CommandOutputPacket. Syntax errors (bad arguments) and unknown
+// commands - including ones from addons / custom commands - are reported here, so we learn about them even
+// though the client can't parse those commands itself.
+LL_AUTO_TYPE_INSTANCE_HOOK(
+    CommandOutputHook,
+    ll::memory::HookPriority::Normal,
+    ClientNetworkHandler,
+    &ClientNetworkHandler::$handle,
+    void,
+    NetworkIdentifier const&   source,
+    CommandOutputPacket const& packet
+) {
+    auto const& output = packet.mOutput.get();
+    if (output.mSuccessCount == 0) {
+        for (auto const& message : output.mMessages) {
+            if (message.mType != CommandOutputMessageType::Error) {
+                continue;
+            }
+            if (message.mMessageId == "commands.generic.syntax") {
+                // params are: text before the error, the offending token, text after it -> the original line
+                std::string line;
+                for (auto const& param : message.mParams) {
+                    line += param;
+                }
+                queueRejection({Rejection::Kind::Line, std::move(line)});
+            } else if (message.mMessageId == "commands.generic.unknown" && !message.mParams.empty()) {
+                queueRejection({Rejection::Kind::CommandName, message.mParams.front()});
+            }
+        }
+    }
+    origin(source, packet);
+}
+
 bool CommandHistory::enable() {
     mLoaded      = false;
     mPendingSave = false;
@@ -258,6 +332,24 @@ void CommandHistory::pollOnClientThread() {
         mLastRaw   = history;
         mLastSaved = persistable(history, trusted);
         return;
+    }
+
+    // Drop commands the server rejected, from the game's own history as well so Up arrow doesn't offer them.
+    for (auto const& rejection : takeRejections()) {
+        auto const matches = [&](std::string const& entry) {
+            if (!shouldPersist(entry)) {
+                return false;
+            }
+            return rejection.kind == Rejection::Kind::Line ? trimmed(entry) == trimmed(rejection.text)
+                                                           : commandWord(entry) == commandWord(rejection.text);
+        };
+        auto const removed = std::erase_if(history, matches);
+        std::erase_if(mLastRaw, matches); // keep the snapshot in step so the removal isn't seen as a "change"
+        if (removed > 0) {
+            log.info("Dropped {} rejected command(s) from history: {}", removed, rejection.text);
+        } else {
+            log.debug("Server rejected '{}' but no matching history entry was found", rejection.text);
+        }
     }
 
     if (history == mLastRaw && !mPendingSave) {
